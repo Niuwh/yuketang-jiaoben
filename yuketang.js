@@ -633,14 +633,18 @@ function yukerang_pro_lms_new() {
           }, 2000)
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
           alertMessage(`正在播放：${className}`);
+          let playover = false; // 代表视频没播放完毕
+          var observer;
           setTimeout(() => {
             // 监测视频播放状态
             let timer = setInterval(() => {
               let status = playOut();
               let classStatus = $('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')[0]?.lastElementChild?.innerText;
               if (status || classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) {
+                playover = true;
                 alertMessage(`${className}播放完毕...`);
                 clearInterval(timer);
+                observer.disconnect();  // 停止监听
                 resolve();
               }
             }, 200)
@@ -652,8 +656,7 @@ function yukerang_pro_lms_new() {
                 setTimeout(() => {  // 防止视频刚加载出来，就加速，出现无法获取到元素地bug
                   speed();
                   claim();
-                  clearInterval(videoTimer)
-                  unexpectedPause();
+                  clearInterval(videoTimer);
                 }, 2000)
               } else if (!video && Date.now() - nowTime > 20000) {  // 如果20s内仍未加载出video
                 localStorage.setItem('n_type', true);
@@ -661,15 +664,17 @@ function yukerang_pro_lms_new() {
               }
             }, 1000)
           }, 2000)
-          //防止切出窗口自动暂停  duck123ducker的贡献pr
+          //防止切出窗口自动暂停  duck123ducker贡献
           observe()
           function observe() {
             if (document.getElementsByClassName('play-btn-tip').length === 0) setTimeout(observe, 100);
             else {
               var targetElement = document.getElementsByClassName('play-btn-tip')[0];
-              var observer = new MutationObserver(function (mutationsList) {
+              observer = new MutationObserver(function (mutationsList) {
                 for (var mutation of mutationsList) {
-                  if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') document.querySelector('.xt_video_bit_play_btn').click();
+                  if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') {
+                    if (!playover) document.querySelector('.xt_video_bit_play_btn').click();  // 视频放完了就不模拟点击播放
+                  }
                 }
               });
               var config = { childList: true };
