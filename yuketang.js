@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.1.0
+// @version      2.1.4
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -17,6 +17,9 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
+
+// 视频播放速率,可选值 [1,1.25,1.5,2],默认为二倍速
+const rate = 2;
 
 // 添加用户交互窗口
 function addWindow() {
@@ -222,8 +225,6 @@ function addWindow() {
 // 脚本运行核心逻辑
 function main() {
   start();
-  // 视频播放速率,可选值 [1,1.25,1.5,2],默认为二倍速
-  const rate = 2;
   // 向弹窗里追加信息
   function alertMessage(message) {
     $('.n_infoAlert').append(`<li>${message}</li>`);
@@ -349,6 +350,7 @@ function main() {
                 } else if (count1 === a.length && play === true) {
                   alertMessage('合集播放完毕');
                   count++;
+                  count1 = 0;
                   localStorage.setItem('userCount', count1);
                   localStorage.setItem(baseUrl, count);
                   main();
@@ -548,7 +550,6 @@ function yukerang_pro_lms_new() {
     $('.n_infoAlert').append(`<li>${message}</li>`);
   }
   function speed() {
-    const rate = 2;
     let keyt = '';
     if (rate === 2 || rate === 1) {
       keyt = "[keyt='" + rate + ".00']"
@@ -639,7 +640,6 @@ function yukerang_pro_lms_new() {
               let classStatus = $('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')[0]?.lastElementChild?.innerText;
               if (status || classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) {
                 alertMessage(`${className}播放完毕...`);
-                clearInterval(pauseTimer);
                 clearInterval(timer);
                 resolve();
               }
@@ -652,7 +652,7 @@ function yukerang_pro_lms_new() {
                 setTimeout(() => {  // 防止视频刚加载出来，就加速，出现无法获取到元素地bug
                   speed();
                   claim();
-                  clearInterval(videoTimer);
+                  clearInterval(videoTimer)
                   unexpectedPause();
                 }, 2000)
               } else if (!video && Date.now() - nowTime > 20000) {  // 如果20s内仍未加载出video
@@ -661,13 +661,13 @@ function yukerang_pro_lms_new() {
               }
             }, 1000)
           }, 2000)
-          //防止切出窗口自动暂停
+          //防止切出窗口自动暂停  duck123ducker的贡献pr
           observe()
-          function observe(){
-            if(document.getElementsByClassName('play-btn-tip').length === 0) setTimeout(observe,100);
-            else{
+          function observe() {
+            if (document.getElementsByClassName('play-btn-tip').length === 0) setTimeout(observe, 100);
+            else {
               var targetElement = document.getElementsByClassName('play-btn-tip')[0];
-              var observer = new MutationObserver(function(mutationsList) {
+              var observer = new MutationObserver(function (mutationsList) {
                 for (var mutation of mutationsList) {
                   if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') document.querySelector('.xt_video_bit_play_btn').click();
                 }
