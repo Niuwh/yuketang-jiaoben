@@ -660,22 +660,22 @@ function yukerang_pro_lms_new() {
                 location.reload();
               }
             }, 1000)
-            // 防止视频意外暂停
-            let pauseTimer;
-            function unexpectedPause() {
-              // 判断视频是否意外暂停
-              pauseTimer = setInterval(() => {
-                let agoTime = document.querySelector('.xt_video_player_current_time_display').firstElementChild.innerText;
-                setTimeout(() => {
-                  let nowTime = document.querySelector('.xt_video_player_current_time_display').firstElementChild.innerText;
-                  console.log();
-                  if (agoTime == nowTime) { // 意外暂停
-                    document.querySelector('.xt_video_bit_play_btn').click();
-                  }
-                }, 3000)
-              }, 2000)
-            }
           }, 2000)
+          //防止切出窗口自动暂停
+          observe()
+          function observe(){
+            if(document.getElementsByClassName('play-btn-tip').length === 0) setTimeout(observe,100);
+            else{
+              var targetElement = document.getElementsByClassName('play-btn-tip')[0];
+              var observer = new MutationObserver(function(mutationsList) {
+                for (var mutation of mutationsList) {
+                  if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') document.querySelector('.xt_video_bit_play_btn').click();
+                }
+              });
+              var config = { childList: true };
+              observer.observe(targetElement, config);
+            }
+          }
         } else if (classType.includes('zuoye')) {
           alertMessage(`进入：${className}，目前没有自动作答功能，敬请期待...`);
           setTimeout(() => {
