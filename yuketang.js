@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.1.4
+// @version      2.1.5
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -13,32 +13,39 @@
 // ==/UserScript==
 // 雨课堂刷课脚本
 /*
+
   已适配雨课堂学校及网址：
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-
+const version = '2.1.5';
 // 视频播放速率,可选值 [1,1.25,1.5,2],默认为二倍速
 const rate = 2;
 
 // 添加用户交互窗口
 function addWindow() {
   // 插入的交互HTML窗口
-  const outerHTML = `  <div class="n_outer">
+  const outerHTML = `<div class="n_outer">
   <div class="n_header">
     雨课堂刷课助手
+    <div class='tools'>
+      <ul>
+        <li class='minimality'>_</li>
+        <li class='question'>?</li>
+      </ul>
+    </div>
   </div>
   <div class="n_body">
     <ul class="n_infoAlert">
-      <li>⭐ 脚本支持：雨课堂官方版本，二倍速，自动播放</li>
-      <li>📢 手动点击进入要刷的课程目录，点击开始刷课，即可自动运行，如页面不动请联系作者</li>
+      <li>⭐ 脚本支持：雨课堂所有版本，二倍速，自动播放</li>
+      <li>📢 手动点击进入要刷的课程目录，点击开始刷课，即可自动运行，如有问腿可联系作者</li>
       <li>⚠️ 运行后请不要随意点击刷课窗口，可新开窗口，可最小化浏览器</li>
       <li>💡 拖动上方标题栏可以进行拖拽哦!</li>
       <hr>
     </ul>
   </div>
   <div class="n_footer">
-    <p>雨课堂助手 2.0.0 </p>
+    <p>雨课堂助手 ${version} </p>
     <div id="n_zanshang">
       <p>赞赏作者</p>
       <img
@@ -48,7 +55,11 @@ function addWindow() {
     <button id="n_button">开始刷课</button>
   </div>
 </div>`;
+  const icon = `<div class='n_icon'>
+放大
+<div/>`
   $('body').append(outerHTML);
+  $('body').append(icon);
   // 添加css样式
   function addStyle() {
     let css = `
@@ -80,7 +91,11 @@ function addWindow() {
       font-family: Avenir, Helvetica, Arial, sans-serif;
       color: #636363;
     }
- 
+    
+    .hide{
+      display:none;
+    }
+
     .n_header {
       text-align: center;
       height: 40px;
@@ -92,7 +107,56 @@ function addWindow() {
       border-radius: 10px 10px 0 0;
       border-bottom: 2px solid #eee;
     }
- 
+
+    .n_header .tools{
+      position:absolute;
+      right:0;
+      top:0;
+    }
+
+    .n_header .tools ul li{
+      position:relative;
+      display:inline-block;
+      padding:0 5px;
+      cursor:pointer;
+    }
+
+    .n_header .minimality::after{
+      content:'最小化';
+      display:none;
+      position:absolute;
+      left:0;
+      bottom:-30px;
+      height:32px;
+      width:50px;
+      font-size:12px;
+      background:#ffffe1;
+      color:#000;
+      border-radius:3px;
+    }
+
+    .n_header .minimality:hover::after{
+      display:block;
+    }
+    
+    .n_header .question::after{
+      content:'有问题';
+      display:none;
+      position:absolute;
+      left:0;
+      bottom:-30px;
+      height:32px;
+      width:50px;
+      font-size:12px;
+      background:#ffffe1;
+      color:#000;
+      border-radius:3px;
+    }
+
+    .n_header .question:hover::after{
+      display:block;
+    }
+
     .n_body {
       font-weight: bold;
       font-size: 13px;
@@ -172,6 +236,20 @@ function addWindow() {
     .n_footer #n_zanshang:hover img {
       display: block;
     }
+
+    .n_icon{
+      background:#f5f5f5;
+      border:1px solid #000;
+      position:fixed;
+      top:0;
+      left:0;
+      height:50px;
+      width:50px;
+      border-radius:6px;
+      z-index:-9999;
+      text-align:center;
+      line-height:50px;
+    }
   `;
     GM_addStyle(css);
   }
@@ -219,6 +297,22 @@ function addWindow() {
     localStorage.removeItem(location.href);
     localStorage.removeItem('userCount');
     localStorage.removeItem('pro_lms_classCount');
+  })
+
+  // 工具类
+  $('.minimality').click(function (e) {
+    let leftPx = e.clientX + 'px', topPx = e.clientY + 'px';
+    $('.n_outer').css('z-index', '-9999');
+    $('.n_icon').css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
+    // 点击事件
+    document.querySelector('.n_icon').addEventListener('click', () => {
+      console.log(1212);
+      $('.n_icon').css('z-index', '-9999');
+      $('.n_outer').css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
+    })
+  })
+  $('.question').click(function () {
+    alert('作者网站：niuwh.cn');
   })
 }
 
@@ -572,15 +666,16 @@ function yukerang_pro_lms_new() {
     ).click();
     alertMessage('已开启静音')
   }
-  function playOut() {
-    let nowTime = document.querySelector('.xt_video_player_current_time_display').firstElementChild.innerText;
-    let totalTime = document.querySelector('.xt_video_player_current_time_display').lastElementChild.innerText;
-    if (nowTime == totalTime) {
-      return true;
-    } else {
-      return false;
-    }
-  }
+  // function playOut() {
+  //   let nowTime = document.querySelector('.xt_video_player_current_time_display').firstElementChild.innerText;
+  //   let totalTime = document.querySelector('.xt_video_player_current_time_display').lastElementChild.innerText;
+  //   console.log(nowTime, totalTime);
+  //   if (nowTime == totalTime) {
+  //     return true;
+  //   } else {
+  //     return false;
+  //   }
+  // }
   function nextCount(classCount) {
     event1 = new Event('mousemove', { bubbles: true });
     event1.clientX = 9999;
@@ -638,12 +733,13 @@ function yukerang_pro_lms_new() {
           setTimeout(() => {
             // 监测视频播放状态
             let timer = setInterval(() => {
-              let status = playOut();
               let classStatus = $('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')[0]?.lastElementChild?.innerText;
-              if (status || classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) {
+              if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) {
                 alertMessage(`${className}播放完毕...`);
                 clearInterval(timer);
-                observer.disconnect();  // 停止监听
+                if (!!observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
+                  observer.disconnect();  // 停止监听
+                }
                 resolve();
               }
             }, 200)
@@ -672,9 +768,8 @@ function yukerang_pro_lms_new() {
               observer = new MutationObserver(function (mutationsList) {
                 for (var mutation of mutationsList) {
                   if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') {
-                    const status = playOut();
                     const classStatus = $('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')[0]?.lastElementChild?.innerText;
-                    if (status || classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) playover = true;
+                    if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) playover = true;
                     if (!playover) document.querySelector('.xt_video_bit_play_btn').click();  // 视频放完了就不模拟点击播放
                   }
                 }
