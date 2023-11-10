@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.1.5
+// @version      2.1.6
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -18,7 +18,7 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-const version = '2.1.5';
+const version = '2.1.6';
 // 视频播放速率,可选值 [1,1.25,1.5,2],默认为二倍速
 const rate = 2;
 
@@ -326,6 +326,12 @@ function main() {
   setInterval(function () {
     document.querySelector('.n_infoAlert').lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
   }, 500)
+  function claim() {
+    $(
+      "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
+    ).click();
+    alertMessage('已开启静音')
+  }
   // 视频自动加速逻辑
   function speed() {
     let keyt = '';
@@ -387,9 +393,11 @@ function main() {
           setTimeout(() => {
             alertMessage('第' + (count + 1) + '个：进入了视频区');
             speed();
+            claim();
             let progress = document.querySelector('.progress-wrap').querySelector('.text');
             let timer1 = setInterval(() => {
-              if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%')) {
+              console.log(progress);
+              if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%') || progress.innerHTML.includes('已完成')) {
                 count++;
                 localStorage.setItem(baseUrl, count);
                 play = true;
@@ -422,10 +430,12 @@ function main() {
                   // 延迟3秒后加速
                   setTimeout(() => {
                     speed();
+                    claim();
                   }, 3000);
                   let timer = setInterval(() => {
                     let progress = document.querySelector('.progress-wrap').querySelector('.text');
-                    if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%')) {
+                    console.log(progress);
+                    if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%') || progress.innerHTML.includes('已完成')) {
                       count1++;
                       localStorage.setItem('userCount', count1);
                       clearInterval(timer);
@@ -734,7 +744,7 @@ function yukerang_pro_lms_new() {
             // 监测视频播放状态
             let timer = setInterval(() => {
               let classStatus = $('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')[0]?.lastElementChild?.innerText;
-              if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) {
+              if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%') || classStatus.includes('已完成')) {
                 alertMessage(`${className}播放完毕...`);
                 clearInterval(timer);
                 if (!!observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
