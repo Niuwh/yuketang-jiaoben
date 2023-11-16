@@ -290,8 +290,9 @@ function addWindow() {
     $('body').off();
   })
   $('#n_button').click(function () {
-    main();
-    $('#n_button').text('刷课中~');
+    if (main()) {
+      $('#n_button').text('刷课中~');
+    }
   })
   $('#n_clear').click(function () {
     localStorage.removeItem(location.href);
@@ -318,14 +319,19 @@ function addWindow() {
 
 // 脚本运行核心逻辑
 function main() {
-  start();
+  if (!start()) {
+    return false;
+  }
+
+  setInterval(function () {
+    document.querySelector('.n_infoAlert').lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
+  }, 500);
+  return true;
+
   // 向弹窗里追加信息
   function alertMessage(message) {
     $('.n_infoAlert').append(`<li>${message}</li>`);
   }
-  setInterval(function () {
-    document.querySelector('.n_infoAlert').lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
-  }, 500)
   function claim() {
     $(
       "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
@@ -364,6 +370,11 @@ function main() {
     } else if (pro_lms.includes(matchURL) || matchURL.includes('yuketang.cn/pro/lms')) {  // 没有匹配到但网址含有 pro/lms 就优先匹配
       yukerang_pro_lms();
     }
+    else {
+      alertMessage(`这不是刷课的页面哦，刷课页面的网址应该匹配 */v2/web/* 或 */pro/lms/*`)
+      return false;
+    }
+    return true;
   }
   // yuketang.cn/v2/web页面的处理逻辑
   function yuketang_v2() {
@@ -819,25 +830,3 @@ function yukerang_pro_lms_new() {
     yukerang_pro_lms_new();
   }
 })();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
