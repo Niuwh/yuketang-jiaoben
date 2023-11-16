@@ -19,8 +19,9 @@
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
 const version = '2.1.6';
-// 视频播放速率,可选值 [1,1.25,1.5,2],默认为二倍速
-const rate = 2;
+// 视频播放速率,可选值 [1,1.25,1.5,16],默认为16倍速
+// TODO: 实测 4 倍速往上有可能出现 bug，3 倍速暂时未出现 bug
+const rate = 3;
 
 // 添加用户交互窗口
 function addWindow() {
@@ -290,8 +291,9 @@ function addWindow() {
     $('body').off();
   })
   $('#n_button').click(function () {
-    main();
-    $('#n_button').text('刷课中~');
+    if (main()) {
+      $('#n_button').text('刷课中~');
+    }
   })
   $('#n_clear').click(function () {
     localStorage.removeItem(location.href);
@@ -316,39 +318,43 @@ function addWindow() {
   })
 }
 
+// 视频自动加速逻辑
+function ykt_speed() {
+  let speedwrap = document.getElementsByTagName("xt-speedbutton")[0];
+  let speedlist = document.getElementsByTagName("xt-speedlist")[0];
+  let speedlistBtn = speedlist.firstElementChild.firstElementChild;
+
+  speedlistBtn.setAttribute('data-speed', rate);
+  speedlistBtn.setAttribute('keyt', rate + '.00');
+  speedlistBtn.innerText = rate +'.00X';
+
+  // 模拟点击
+  let mousemove = document.createEvent("MouseEvent");
+  mousemove.initMouseEvent("mousemove", true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
+  speedwrap.dispatchEvent(mousemove);
+  speedlistBtn.click();
+}
+
 // 脚本运行核心逻辑
 function main() {
-  start();
+  if (!start()) {
+    return false;
+  }
+
+  setInterval(function () {
+    document.querySelector('.n_infoAlert').lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
+  }, 500);
+  return true;
+
   // 向弹窗里追加信息
   function alertMessage(message) {
     $('.n_infoAlert').append(`<li>${message}</li>`);
   }
-  setInterval(function () {
-    document.querySelector('.n_infoAlert').lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
-  }, 500)
   function claim() {
     $(
       "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
     ).click();
     alertMessage('已开启静音')
-  }
-  // 视频自动加速逻辑
-  function speed() {
-    let keyt = '';
-    if (rate === 2 || rate === 1) {
-      keyt = "[keyt='" + rate + ".00']"
-    } else {
-      keyt = "[keyt='" + rate + "']"
-    }
-    function fun(className, selector) {
-      var mousemove = document.createEvent("MouseEvent");
-      mousemove.initMouseEvent("mousemove", true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
-      console.log(document.getElementsByClassName(className)[0]);
-      document.getElementsByClassName(className)[0].dispatchEvent(mousemove);
-      document.querySelector(selector).click();
-      alertMessage('已开始两倍速播放');
-    }
-    fun('xt_video_player_speed', keyt)
   }
   // 判断页面类型执行不同的操作
   function start() {
@@ -364,6 +370,11 @@ function main() {
     } else if (pro_lms.includes(matchURL) || matchURL.includes('yuketang.cn/pro/lms')) {  // 没有匹配到但网址含有 pro/lms 就优先匹配
       yukerang_pro_lms();
     }
+    else {
+      alertMessage(`这不是刷课的页面哦，刷课页面的网址应该匹配 */v2/web/* 或 */pro/lms/*`)
+      return false;
+    }
+    return true;
   }
   // yuketang.cn/v2/web页面的处理逻辑
   function yuketang_v2() {
@@ -392,7 +403,7 @@ function main() {
           classList[count].click();
           setTimeout(() => {
             alertMessage('第' + (count + 1) + '个：进入了视频区');
-            speed();
+            ykt_speed();
             claim();
             let progress = document.querySelector('.progress-wrap').querySelector('.text');
             let timer1 = setInterval(() => {
@@ -429,7 +440,7 @@ function main() {
                   alertMessage(`开始播放视频`);
                   // 延迟3秒后加速
                   setTimeout(() => {
-                    speed();
+                    ykt_speed();
                     claim();
                   }, 3000);
                   let timer = setInterval(() => {
@@ -556,7 +567,7 @@ function main() {
                     alertMessage(`开始播放：${className}里面的第${i + 1}个视频`)
                     await new Promise(function (resolve) {
                       setTimeout(function () {
-                        speed();  // 加速
+                        ykt_speed();  // 加速
                         $('.xt_video_player_common_icon').click();  // 静音
                         resolve();
                       }, 3000)
@@ -585,7 +596,7 @@ function main() {
               alertMessage(`开始播放视频：${className}`);
               await new Promise(function (resolve) {
                 setTimeout(function () {
-                  speed();
+                  ykt_speed();
                   $('.xt_video_player_common_icon').click();
                   resolve();
                 }, 3000)
@@ -652,23 +663,6 @@ function main() {
 function yukerang_pro_lms_new() {
   function alertMessage(message) {
     $('.n_infoAlert').append(`<li>${message}</li>`);
-  }
-  function speed() {
-    let keyt = '';
-    if (rate === 2 || rate === 1) {
-      keyt = "[keyt='" + rate + ".00']"
-    } else {
-      keyt = "[keyt='" + rate + "']"
-    }
-    function fun(className, selector) {
-      var mousemove = document.createEvent("MouseEvent");
-      mousemove.initMouseEvent("mousemove", true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
-      console.log(document.getElementsByClassName(className)[0]);
-      document.getElementsByClassName(className)[0].dispatchEvent(mousemove);
-      document.querySelector(selector).click();
-      alertMessage('已开始两倍速播放');
-    }
-    fun('xt_video_player_speed', keyt)
   }
   function claim() {
     $(
@@ -759,7 +753,7 @@ function yukerang_pro_lms_new() {
               let video = document.querySelector('video');
               if (video) {
                 setTimeout(() => {  // 防止视频刚加载出来，就加速，出现无法获取到元素地bug
-                  speed();
+                  ykt_speed();
                   claim();
                   observe();
                   clearInterval(videoTimer);
@@ -819,25 +813,3 @@ function yukerang_pro_lms_new() {
     yukerang_pro_lms_new();
   }
 })();
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
