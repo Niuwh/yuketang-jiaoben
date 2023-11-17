@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.1.6
+// @version      2.2.0
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -18,10 +18,10 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-const version = '2.1.6';
-// 视频播放速率,可选值 [1,1.25,1.5,16],默认为16倍速
+const version = '2.2.0';
+// 视频播放速率,可选值 [1,1.25,1.5,2,3,16],默认为2倍速
 // TODO: 实测 4 倍速往上有可能出现 bug，3 倍速暂时未出现 bug
-const rate = 3;
+let rate = 2;
 
 // 添加用户交互窗口
 function addWindow() {
@@ -38,7 +38,7 @@ function addWindow() {
   </div>
   <div class="n_body">
     <ul class="n_infoAlert">
-      <li>⭐ 脚本支持：雨课堂所有版本，二倍速，自动播放</li>
+      <li>⭐ 脚本支持：雨课堂所有版本，支持多倍速，自动播放</li>
       <li>📢 手动点击进入要刷的课程目录，点击开始刷课，即可自动运行，如有问腿可联系作者</li>
       <li>⚠️ 运行后请不要随意点击刷课窗口，可新开窗口，可最小化浏览器</li>
       <li>💡 拖动上方标题栏可以进行拖拽哦!</li>
@@ -314,7 +314,7 @@ function addWindow() {
     })
   })
   $('.question').click(function () {
-    alert('作者网站：niuwh.cn');
+    alert('作者网站：niuwh.cn' + '    ' + 'QQ反馈交流群：384302095');
   })
 }
 
@@ -326,7 +326,7 @@ function ykt_speed() {
 
   speedlistBtn.setAttribute('data-speed', rate);
   speedlistBtn.setAttribute('keyt', rate + '.00');
-  speedlistBtn.innerText = rate +'.00X';
+  speedlistBtn.innerText = rate + '.00X';
 
   // 模拟点击
   let mousemove = document.createEvent("MouseEvent");
@@ -670,16 +670,6 @@ function yukerang_pro_lms_new() {
     ).click();
     alertMessage('已开启静音')
   }
-  // function playOut() {
-  //   let nowTime = document.querySelector('.xt_video_player_current_time_display').firstElementChild.innerText;
-  //   let totalTime = document.querySelector('.xt_video_player_current_time_display').lastElementChild.innerText;
-  //   console.log(nowTime, totalTime);
-  //   if (nowTime == totalTime) {
-  //     return true;
-  //   } else {
-  //     return false;
-  //   }
-  // }
   function nextCount(classCount) {
     event1 = new Event('mousemove', { bubbles: true });
     event1.clientX = 9999;
