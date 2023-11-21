@@ -18,7 +18,7 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-const version = '2.2.0';
+const version = '2.2.1';
 // 视频播放速率,可选值 [1,1.25,1.5,2,3,16],默认为2倍速
 // TODO: 实测 4 倍速往上有可能出现 bug，3 倍速暂时未出现 bug
 let rate = 2;
@@ -327,6 +327,7 @@ function ykt_speed() {
   speedlistBtn.setAttribute('data-speed', rate);
   speedlistBtn.setAttribute('keyt', rate + '.00');
   speedlistBtn.innerText = rate + '.00X';
+  alertMessage('已开启' + rate + '倍速');
 
   // 模拟点击
   let mousemove = document.createEvent("MouseEvent");
@@ -365,7 +366,7 @@ function main() {
     const changjiangv2 = ['changjiang.yuketang.cn/v2/web', 'yuketang.cn/v2/web', 'www.yuketang.cn/v2/web', 'xxxxx.yuketang.cn/v2/web', 'rain.gdufemooc.cn/v2/web'];
     const pro_lms = ['bksycsu.yuketang.cn/pro/lms', 'henuyjs.yuketang.cn/pro/lms'];
     alertMessage(`正在为您匹配${url}的处理逻辑...`);
-    if (changjiangv2.includes(matchURL)) {
+    if (changjiangv2.includes(matchURL) || matchURL.includes('yuketang.cn/v2/web')) {
       yuketang_v2();
     } else if (pro_lms.includes(matchURL) || matchURL.includes('yuketang.cn/pro/lms')) {  // 没有匹配到但网址含有 pro/lms 就优先匹配
       yukerang_pro_lms();
