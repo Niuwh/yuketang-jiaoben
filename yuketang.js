@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.2.0
+// @version      2.2.4
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -18,13 +18,15 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-const version = '2.2.1';
+const version = '2.2.4';
 // 视频播放速率,可选值 [1,1.25,1.5,2,3,16],默认为2倍速
 // TODO: 实测 4 倍速往上有可能出现 bug，3 倍速暂时未出现 bug
 let rate = 2;
 
+const n_yuketang = {};
+
 // 添加用户交互窗口
-function addWindow() {
+n_yuketang.addWindow = function () {
   // 插入的交互HTML窗口
   const outerHTML = `<div class="n_outer">
   <div class="n_header">
@@ -291,7 +293,7 @@ function addWindow() {
     $('body').off();
   })
   $('#n_button').click(function () {
-    if (main()) {
+    if (n_yuketang.main()) {
       $('#n_button').text('刷课中~');
     }
   })
@@ -316,10 +318,15 @@ function addWindow() {
   $('.question').click(function () {
     alert('作者网站：niuwh.cn' + '    ' + 'QQ反馈交流群：384302095');
   })
-}
+};
+
+// 向弹窗里追加信息
+n_yuketang.alertMessage = function (message) {
+  $('.n_infoAlert').append(`<li>${message}</li>`);
+};
 
 // 视频自动加速逻辑
-function ykt_speed() {
+n_yuketang.ykt_speed = function () {
   let speedwrap = document.getElementsByTagName("xt-speedbutton")[0];
   let speedlist = document.getElementsByTagName("xt-speedlist")[0];
   let speedlistBtn = speedlist.firstElementChild.firstElementChild;
@@ -327,17 +334,17 @@ function ykt_speed() {
   speedlistBtn.setAttribute('data-speed', rate);
   speedlistBtn.setAttribute('keyt', rate + '.00');
   speedlistBtn.innerText = rate + '.00X';
-  alertMessage('已开启' + rate + '倍速');
+  n_yuketang.alertMessage('已开启' + rate + '倍速');
 
   // 模拟点击
   let mousemove = document.createEvent("MouseEvent");
   mousemove.initMouseEvent("mousemove", true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
   speedwrap.dispatchEvent(mousemove);
   speedlistBtn.click();
-}
+};
 
 // 脚本运行核心逻辑
-function main() {
+n_yuketang.main = function () {
   if (!start()) {
     return false;
   }
@@ -347,15 +354,11 @@ function main() {
   }, 500);
   return true;
 
-  // 向弹窗里追加信息
-  function alertMessage(message) {
-    $('.n_infoAlert').append(`<li>${message}</li>`);
-  }
   function claim() {
     $(
       "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
     ).click();
-    alertMessage('已开启静音')
+    n_yuketang.alertMessage('已开启静音')
   }
   // 判断页面类型执行不同的操作
   function start() {
@@ -365,21 +368,21 @@ function main() {
     console.log(matchURL);
     const changjiangv2 = ['changjiang.yuketang.cn/v2/web', 'yuketang.cn/v2/web', 'www.yuketang.cn/v2/web', 'xxxxx.yuketang.cn/v2/web', 'rain.gdufemooc.cn/v2/web'];
     const pro_lms = ['bksycsu.yuketang.cn/pro/lms', 'henuyjs.yuketang.cn/pro/lms'];
-    alertMessage(`正在为您匹配${url}的处理逻辑...`);
+    n_yuketang.alertMessage(`正在为您匹配${url}的处理逻辑...`);
     if (changjiangv2.includes(matchURL) || matchURL.includes('yuketang.cn/v2/web')) {
       yuketang_v2();
     } else if (pro_lms.includes(matchURL) || matchURL.includes('yuketang.cn/pro/lms')) {  // 没有匹配到但网址含有 pro/lms 就优先匹配
       yukerang_pro_lms();
     }
     else {
-      alertMessage(`这不是刷课的页面哦，刷课页面的网址应该匹配 */v2/web/* 或 */pro/lms/*`)
+      n_yuketang.alertMessage(`这不是刷课的页面哦，刷课页面的网址应该匹配 */v2/web/* 或 */pro/lms/*`)
       return false;
     }
     return true;
   }
   // yuketang.cn/v2/web页面的处理逻辑
   function yuketang_v2() {
-    alertMessage('已匹配到www.yuketang.cn,正在处理...');
+    n_yuketang.alertMessage('已匹配到www.yuketang.cn,正在处理...');
     // 用于判断不同的课程
     let baseUrl = location.href;
     // 根据客户端记录的URL判别刷到那一集了,不影响第一批用户的刷课进度。
@@ -388,7 +391,7 @@ function main() {
       localStorage.removeItem('classIndex');
     }
     let count = +localStorage.getItem(baseUrl) || 0;
-    alertMessage(`检测到已经播放到${count}集...`);
+    n_yuketang.alertMessage(`检测到已经播放到${count}集...`);
     let classList = [];
     // 用于标记视频是否播放完毕
     let play = true;
@@ -396,16 +399,42 @@ function main() {
     function main() {
       autoSlide(count).then(() => {
         let list = document.querySelector('.logs-list').childNodes;
-        alertMessage('刷课状态：第' + (count + 1) + '个/' + list.length + '个');
+        n_yuketang.alertMessage('刷课状态：第' + (count + 1) + '个/' + list.length + '个');
         classList[count] = list[count]?.querySelector('.content-box')?.querySelector('section');
-        let classInfo = classList[count]?.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href');
+        let classInfo = classList[count]?.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang'; // 2023.11.23 雨课堂更新，去掉了批量字样
+        console.log(classInfo);
         if (classInfo?.includes('shipin') && play === true) { // 视频处理
           play = false;
+          // 意外暂停之后恢复播放
+          // function observe() {
+          //   if (document.getElementsByClassName('play-btn-tip').length === 0) setTimeout(observe, 100);
+          //   else {
+          //     var targetElement = document.getElementsByClassName('play-btn-tip')[0];
+          //     observer = new MutationObserver(function (mutationsList) {
+          //       for (var mutation of mutationsList) {
+          //         if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') {
+          //           let progress = document.querySelector('.progress-wrap').querySelector('.text');
+          //           if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%') || progress.innerHTML.includes('已完成')) play = true;
+          //           if (!play) { // 视频放完了就不模拟点击播放
+          //             console.log('视频意外暂停了');
+          //             // 模拟点击
+          //             claim();
+          //             $("#video-box > div > xt-wrap > xt-controls > xt-inner > xt-playbutton > xt-tip").click();
+          //           }
+          //         }
+          //       }
+          //     });
+          //     var config = { childList: true };
+          //     observer.observe(targetElement, config);
+          //     document.querySelector('.xt_video_bit_play_btn').click(); //防止进入下一章时由于鼠标离开窗口而在视频开始时就暂停导致永远无法触发监听器
+          //   }
+          // }
           classList[count].click();
           setTimeout(() => {
-            alertMessage('第' + (count + 1) + '个：进入了视频区');
-            ykt_speed();
+            n_yuketang.alertMessage('第' + (count + 1) + '个：进入了视频区');
+            n_yuketang.ykt_speed();
             claim();
+            // observe();
             let progress = document.querySelector('.progress-wrap').querySelector('.text');
             let timer1 = setInterval(() => {
               console.log(progress);
@@ -413,6 +442,9 @@ function main() {
                 count++;
                 localStorage.setItem(baseUrl, count);
                 play = true;
+                // if (!!observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
+                //   observer.disconnect();  // 停止监听
+                // }
                 history.back();
                 main();
                 clearInterval(timer1);
@@ -426,7 +458,7 @@ function main() {
           async function sync() {
             await zhankai.click();
             setTimeout(() => {
-              alertMessage('第' + (count + 1) + '个：进入了批量区');
+              n_yuketang.alertMessage('第' + (count + 1) + '个：进入了批量区');
               localStorage.getItem('userCount') ? localStorage.getItem('userCount') : localStorage.setItem('userCount', 0);
               // 保存所有视频
               let a = list[count].querySelector('.leaf_list__wrap').querySelectorAll('.activity__wrap');
@@ -438,10 +470,10 @@ function main() {
                 if (classInfo1?.includes('shipin') && play === true) {
                   play = false;
                   a[count1].click();
-                  alertMessage(`开始播放视频`);
+                  n_yuketang.alertMessage(`开始播放视频`);
                   // 延迟3秒后加速
                   setTimeout(() => {
-                    ykt_speed();
+                    n_yuketang.ykt_speed();
                     claim();
                   }, 3000);
                   let timer = setInterval(() => {
@@ -451,7 +483,7 @@ function main() {
                       count1++;
                       localStorage.setItem('userCount', count1);
                       clearInterval(timer);
-                      alertMessage(`视频播放完毕`);
+                      n_yuketang.alertMessage(`视频播放完毕`);
                       history.back();
                       setTimeout(() => {
                         bofang();
@@ -459,12 +491,12 @@ function main() {
                     }
                   }, 3000)
                 } else if (classInfo1 && !classInfo1.includes('shipin') && play === true) {
-                  alertMessage('不是视频');
+                  n_yuketang.alertMessage('不是视频');
                   count1++;
                   localStorage.setItem('userCount', count1);
                   bofang();
                 } else if (count1 === a.length && play === true) {
-                  alertMessage('合集播放完毕');
+                  n_yuketang.alertMessage('合集播放完毕');
                   count++;
                   count1 = 0;
                   localStorage.setItem('userCount', count1);
@@ -475,7 +507,7 @@ function main() {
             }, 2000)
           }
         } else if (classInfo?.includes('ketang') && play === true) {    // 课堂处理
-          alertMessage('第' + (count + 1) + '个：进入了课堂区');
+          n_yuketang.alertMessage('第' + (count + 1) + '个：进入了课堂区');
           play = false;
           classList[count].click();
           setTimeout(() => {
@@ -505,7 +537,7 @@ function main() {
                 // 内容为音频的逻辑
                 if (document.querySelector('audio')) {
                   function isComplate() {
-                    let mainArea = document.querySelector('.mainArea');
+                    let mainArea = document.querySelector('.n_yuketang.mainArea');
                     let currentTime = mainArea.querySelectorAll('span')[0].innerHTML.toString();
                     let totalTime = mainArea.querySelectorAll('span')[1].innerHTML.toString();
                     if (currentTime == totalTime || currentTime == '00:00' || currentTime == '00:00:00') {
@@ -531,8 +563,8 @@ function main() {
             }
           }, 3000)
         } else if (classInfo?.includes('kejian') && play === true) {  // 课件处理
-          alertMessage('根据ycj用户的反馈修改新增课件处理，且赞助支持，表示感谢') // 8.8元
-          alertMessage('第' + (count + 1) + '个：进入了课件区');
+          n_yuketang.alertMessage('根据ycj用户的反馈修改新增课件处理，且赞助支持，表示感谢') // 8.8元
+          n_yuketang.alertMessage('第' + (count + 1) + '个：进入了课件区');
           play = false;
           classList[count].click();
           let classType;
@@ -549,31 +581,31 @@ function main() {
             console.log(className);
             if (classType == '课件PPT') {  // 课件为ppt
               let allPPT = $('.swiper-wrapper')[0].children;
-              alertMessage(`开始播放${className}`)
+              n_yuketang.alertMessage(`开始播放${className}`)
               for (let i = 0; i < allPPT.length; i++) {
                 await new Promise(function (resolve) {
                   setTimeout(function () {
                     allPPT[i].click();
-                    alertMessage(`${className}：第${i + 1}个ppt已经播放`);
+                    n_yuketang.alertMessage(`${className}：第${i + 1}个ppt已经播放`);
                     resolve();
                   }, 500)
                 })
               }
               if ($('.video-box')) {  // 回头检测如果ppt里面有视频
                 let pptVideo = $('.video-box');
-                alertMessage('检测到ppt里面有视频，将继续播放视频');
+                n_yuketang.alertMessage('检测到ppt里面有视频，将继续播放视频');
                 for (let i = 0; i < pptVideo.length; i++) {
                   if ($('.video-box')[i].innerText != '已完成') {   // 判断视频是否已播放
                     pptVideo[i].click();
-                    alertMessage(`开始播放：${className}里面的第${i + 1}个视频`)
+                    n_yuketang.alertMessage(`开始播放：${className}里面的第${i + 1}个视频`)
                     await new Promise(function (resolve) {
                       setTimeout(function () {
-                        ykt_speed();  // 加速
+                        n_yuketang.ykt_speed();  // 加速
                         $('.xt_video_player_common_icon').click();  // 静音
                         resolve();
                       }, 3000)
                     })
-                    alertMessage('已开启二倍速，且自动静音');
+                    n_yuketang.alertMessage('已开启二倍速，且自动静音');
                     await new Promise(function (resolve) {
                       let timer = setInterval(function () {
                         let allTime = $('.xt_video_player_current_time_display')[0].innerText;
@@ -587,22 +619,22 @@ function main() {
                       }, 200);
                     })  // 等待视频结束
                   } else {  // 视频已完成
-                    alertMessage(`检测到${className}里面的第${i + 1}个视频已经播放完毕`);
+                    n_yuketang.alertMessage(`检测到${className}里面的第${i + 1}个视频已经播放完毕`);
                   }
                 }
               }
-              alertMessage(`${className} 已经播放完毕`)
+              n_yuketang.alertMessage(`${className} 已经播放完毕`)
             } else {  // 课件为视频
               $('.video-box').click();
-              alertMessage(`开始播放视频：${className}`);
+              n_yuketang.alertMessage(`开始播放视频：${className}`);
               await new Promise(function (resolve) {
                 setTimeout(function () {
-                  ykt_speed();
+                  n_yuketang.ykt_speed();
                   $('.xt_video_player_common_icon').click();
                   resolve();
                 }, 3000)
               })  // 3秒后加速,静音
-              alertMessage('已开启二倍速，且自动静音');
+              n_yuketang.alertMessage('已开启二倍速，且自动静音');
               await new Promise(function (resolve) {
                 let timer = setInterval(function () {
                   let allTime = $('.xt_video_player_current_time_display')[0].innerText;
@@ -615,7 +647,7 @@ function main() {
                   }
                 }, 200);
               })  // 等待视频结束
-              alertMessage(`${className} 视频播放完毕`)
+              n_yuketang.alertMessage(`${className} 视频播放完毕`)
             }
             count++;
             localStorage.setItem(baseUrl, count);
@@ -624,12 +656,12 @@ function main() {
             main();
           })()
         } else if (count === list.length && play === true) {            // 结束
-          alertMessage('课程刷完了');
-          $('#n_buttoni').text('刷完了~');
+          n_yuketang.alertMessage('课程刷完了');
+          $('#n_button').text('刷完了~');
           localStorage.setItem(baseUrl, 0);
           return;
         } else if (!(classInfo.includes('shipin') || classInfo.includes('piliang') || classInfo.includes('kejian')) && play === true) { // 视频，批量，课件都不是的时候跳过，此处可以优化
-          alertMessage('第' + (count + 1) + '个：不是视频，已跳过');
+          n_yuketang.alertMessage('第' + (count + 1) + '个：不是视频，已跳过');
           count++;
           localStorage.setItem(baseUrl, count);
           main();
@@ -653,23 +685,20 @@ function main() {
   // yuketang.cn/pro/lms页面的处理逻辑
   function yukerang_pro_lms() {
     localStorage.setItem('n_type', true);
-    alertMessage('正准备打开新标签页...');
+    n_yuketang.alertMessage('正准备打开新标签页...');
     localStorage.getItem('pro_lms_classCount') ? null : localStorage.setItem('pro_lms_classCount', 1);  // 初始化集数
     let classCount = localStorage.getItem('pro_lms_classCount') - 1;
     $('.leaf-detail')[classCount].click();  // 进入第一个课程，启动脚本
   }
   // 其他不同类型的DOM页面的处理逻辑，待完善...
-}
+};
 
-function yukerang_pro_lms_new() {
-  function alertMessage(message) {
-    $('.n_infoAlert').append(`<li>${message}</li>`);
-  }
+n_yuketang.yukerang_pro_lms_new = function () {
   function claim() {
     $(
       "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
     ).click();
-    alertMessage('已开启静音')
+    n_yuketang.alertMessage('已开启静音')
   }
   function nextCount(classCount) {
     event1 = new Event('mousemove', { bubbles: true });
@@ -682,7 +711,7 @@ function yukerang_pro_lms_new() {
       main();
     } else {
       localStorage.removeItem('pro_lms_classCount');
-      alertMessage('课程播放完毕了');
+      n_yuketang.alertMessage('课程播放完毕了');
     }
   }
   function controllScroll() {
@@ -701,28 +730,28 @@ function yukerang_pro_lms_new() {
       console.log('leave');
     })
   }
-  alertMessage('已就绪，开始刷课，请尽量保持页面不动。');
+  n_yuketang.alertMessage('已就绪，开始刷课，请尽量保持页面不动。');
   let classCount = localStorage.getItem('pro_lms_classCount');
   controllScroll();
   async function main() {
-    alertMessage(`准备播放第${classCount}集...`);
+    n_yuketang.alertMessage(`准备播放第${classCount}集...`);
     await new Promise(function (resolve) {
       setTimeout(function () {
         let className = $('.header-bar')[0].firstElementChild.innerText;
         let classType = $('.header-bar')[0].firstElementChild.firstElementChild.getAttribute('class');
         let classStatus = $('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')[0]?.lastElementChild?.innerText;
         if (classType.includes('tuwen') && classStatus != '已读') {
-          alertMessage(`正在废寝忘食地看:${className}中...`);
+          n_yuketang.alertMessage(`正在废寝忘食地看:${className}中...`);
           setTimeout(() => {
             resolve();
           }, 2000)
         } else if (classType.includes('taolun')) {
-          alertMessage(`只是看看，目前没有自动发表讨论功能，欢迎反馈...`);
+          n_yuketang.alertMessage(`只是看看，目前没有自动发表讨论功能，欢迎反馈...`);
           setTimeout(() => {
             resolve();
           }, 2000)
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
-          alertMessage(`正在播放：${className}`);
+          n_yuketang.alertMessage(`正在播放：${className}`);
           let playover = false; // 代表视频没播放完毕
           var observer;
           setTimeout(() => {
@@ -730,7 +759,7 @@ function yukerang_pro_lms_new() {
             let timer = setInterval(() => {
               let classStatus = $('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')[0]?.lastElementChild?.innerText;
               if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%') || classStatus.includes('已完成')) {
-                alertMessage(`${className}播放完毕...`);
+                n_yuketang.alertMessage(`${className}播放完毕...`);
                 clearInterval(timer);
                 if (!!observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
                   observer.disconnect();  // 停止监听
@@ -744,7 +773,7 @@ function yukerang_pro_lms_new() {
               let video = document.querySelector('video');
               if (video) {
                 setTimeout(() => {  // 防止视频刚加载出来，就加速，出现无法获取到元素地bug
-                  ykt_speed();
+                  n_yuketang.ykt_speed();
                   claim();
                   observe();
                   clearInterval(videoTimer);
@@ -775,32 +804,33 @@ function yukerang_pro_lms_new() {
             }
           }
         } else if (classType.includes('zuoye')) {
-          alertMessage(`进入：${className}，目前没有自动作答功能，敬请期待...`);
+          n_yuketang.alertMessage(`进入：${className}，目前没有自动作答功能，敬请期待...`);
           setTimeout(() => {
             resolve();
           }, 2000)
         } else {
-          alertMessage(`您已经看过${className}...`);
+          n_yuketang.alertMessage(`您已经看过${className}...`);
           setTimeout(() => {
             resolve();
           }, 2000)
         }
       }, 2000);
     })
-    alertMessage(`第${classCount}集播放完了...`);
+    n_yuketang.alertMessage(`第${classCount}集播放完了...`);
     classCount++;
     nextCount(classCount);
   }
   main();
-}
+};
+
 
 // 油猴执行文件
 (function () {
   'use strict';
-  addWindow();
+  n_yuketang.addWindow();
   if (localStorage.getItem('n_type') === 'true') {
     $('#n_button').text('刷课中~');
     localStorage.setItem('n_type', false);
-    yukerang_pro_lms_new();
+    n_yuketang.yukerang_pro_lms_new();
   }
 })();
