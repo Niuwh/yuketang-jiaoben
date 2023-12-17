@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.2.7
+// @version      2.3.0
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -18,17 +18,19 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-const version = '2.2.7';
+const version = '2.3.0';
 // 视频播放速率,可选值 [1,1.25,1.5,2,3,16],默认为2倍速
 // TODO: 实测 4 倍速往上有可能出现 bug，3 倍速暂时未出现 bug
 let rate = 2;
+// 视频是否静音,默认静音,想要不改为静音请改为false
+const isClaim = false;
 
 const n_yuketang = {};
 
 // 添加用户交互窗口
 n_yuketang.addWindow = function () {
   // 插入的交互HTML窗口
-  const outerHTML = `<div class="n_outer">
+  const outerHTML = `<div class="nw_outer">
   <div class="n_header">
     雨课堂刷课助手
     <div class='tools'>
@@ -78,7 +80,7 @@ n_yuketang.addWindow = function () {
       height: 100vh;
     }
  
-    .n_outer {
+    .nw_outer {
       margin: 0;
       padding: 0;
       position: fixed;
@@ -271,15 +273,15 @@ n_yuketang.addWindow = function () {
       // 通过判断是否溢出屏幕
       if (left <= 0) {
         left = 0;
-      } else if (left >= clientWidth - $('.n_outer')[0].offsetWidth) {
-        left = clientWidth - $('.n_outer')[0].offsetWidth
+      } else if (left >= clientWidth - $('.nw_outer')[0].offsetWidth) {
+        left = clientWidth - $('.nw_outer')[0].offsetWidth
       }
       if (top <= 0) {
         top = 0
-      } else if (top >= clientHeight - $('.n_outer')[0].offsetHeight) {
-        top = clientHeight - $('.n_outer')[0].offsetHeight
+      } else if (top >= clientHeight - $('.nw_outer')[0].offsetHeight) {
+        top = clientHeight - $('.nw_outer')[0].offsetHeight
       }
-      $('.n_outer').css({
+      $('.nw_outer').css({
         left: () => {
           return left + 'px';
         },
@@ -306,13 +308,13 @@ n_yuketang.addWindow = function () {
   // 工具类
   $('.minimality').click(function (e) {
     let leftPx = e.clientX + 'px', topPx = e.clientY + 'px';
-    $('.n_outer').css('z-index', '-9999');
+    $('.nw_outer').css('z-index', '-9999');
     $('.n_icon').css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
     // 点击事件
     document.querySelector('.n_icon').addEventListener('click', () => {
       console.log(1212);
       $('.n_icon').css('z-index', '-9999');
-      $('.n_outer').css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
+      $('.nw_outer').css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
     })
   })
   $('.question').click(function () {
@@ -361,19 +363,34 @@ n_yuketang.controllScroll = function () {
   })
 }
 
+// 静音
+function claim() {
+  if (isClaim) {
+    $(
+      "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
+    ).click();
+    n_yuketang.alertMessage('已开启静音')
+  } else {  // 不开静音的话默认把音量设置为1%
+    let xtvolumebutton = document.getElementsByTagName('xt-volumebutton')[0];
+    let xtvolumeseek = document.getElementsByTagName('xt-volumeseek')[0];
+    // 模拟点击
+    let mousemove = document.createEvent("MouseEvent");
+    mousemove.initMouseEvent("mousemove", true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
+    xtvolumebutton.dispatchEvent(mousemove);
+    document.getElementsByTagName('xt-volumeseeked')[0].setAttribute('style', 'height: 1%;');
+    document.getElementsByTagName('xt-volumehandle')[0].setAttribute('style', 'bottom: 1%;');
+    let click = document.createEvent("MouseEvent");
+    click.initMouseEvent('click', true, true, unsafeWindow, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, null);
+    xtvolumeseek.dispatchEvent(click);
+  }
+}
+
 // 脚本运行核心逻辑
 n_yuketang.main = function () {
   if (!start()) {
     return false;
   }
   return true;
-
-  function claim() {
-    $(
-      "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
-    ).click();
-    n_yuketang.alertMessage('已开启静音')
-  }
   // 判断页面类型执行不同的操作
   function start() {
     const url = location.host;
@@ -742,12 +759,6 @@ n_yuketang.main = function () {
 };
 
 n_yuketang.yukerang_pro_lms_new = function () {
-  function claim() {
-    $(
-      "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
-    ).click();
-    n_yuketang.alertMessage('已开启静音')
-  }
   function nextCount(classCount) {
     event1 = new Event('mousemove', { bubbles: true });
     event1.clientX = 9999;
