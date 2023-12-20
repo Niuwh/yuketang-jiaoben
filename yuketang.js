@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.3.0
+// @version      2.3.1
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -18,12 +18,12 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-const version = '2.3.0';
+const version = '2.3.1';
 // 视频播放速率,可选值 [1,1.25,1.5,2,3,16],默认为2倍速
 // TODO: 实测 4 倍速往上有可能出现 bug，3 倍速暂时未出现 bug
 let rate = 2;
 // 视频是否静音,默认静音,想要不改为静音请改为false
-const isClaim = false;
+const isClaim = true;
 
 const n_yuketang = {};
 
@@ -370,18 +370,8 @@ function claim() {
       "#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon"
     ).click();
     n_yuketang.alertMessage('已开启静音')
-  } else {  // 不开静音的话默认把音量设置为1%
-    let xtvolumebutton = document.getElementsByTagName('xt-volumebutton')[0];
-    let xtvolumeseek = document.getElementsByTagName('xt-volumeseek')[0];
-    // 模拟点击
-    let mousemove = document.createEvent("MouseEvent");
-    mousemove.initMouseEvent("mousemove", true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
-    xtvolumebutton.dispatchEvent(mousemove);
-    document.getElementsByTagName('xt-volumeseeked')[0].setAttribute('style', 'height: 1%;');
-    document.getElementsByTagName('xt-volumehandle')[0].setAttribute('style', 'bottom: 1%;');
-    let click = document.createEvent("MouseEvent");
-    click.initMouseEvent('click', true, true, unsafeWindow, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, null);
-    xtvolumeseek.dispatchEvent(click);
+  } else {  // 不开静音的话默认把音量设置为1% 暂未实现
+
   }
 }
 
@@ -414,14 +404,9 @@ n_yuketang.main = function () {
   }
   // yuketang.cn/v2/web页面的处理逻辑
   function yuketang_v2() {
-    n_yuketang.alertMessage('已匹配到www.yuketang.cn,正在处理...');
+    n_yuketang.alertMessage('已匹配到yuketang.cn/v2/web,正在处理...');
     // 用于判断不同的课程
-    let baseUrl = location.href;
-    // 根据客户端记录的URL判别刷到那一集了,不影响第一批用户的刷课进度。
-    if (localStorage.getItem('classIndex')) {
-      localStorage.setItem(baseUrl, +localStorage.getItem('classIndex'));
-      localStorage.removeItem('classIndex');
-    }
+    const baseUrl = location.href;
     let count = +localStorage.getItem(baseUrl) || 0;
     n_yuketang.alertMessage(`检测到已经播放到${count}集...`);
     let classList = [];
@@ -620,7 +605,9 @@ n_yuketang.main = function () {
           }, 3000)
         } else if (classInfo?.includes('kejian') && play === true) {  // 课件处理
           // && classList[count]?.__vue__.content?.includes('已结课')
-          if (classList[count].parentNode.parentNode.parentNode.__vue__.tableData.deadline < Date.now() || classList[count].parentNode.parentNode.parentNode.__vue__.tableData.end < Date.now()) {  // 没有该属性默认没有结课
+          const tableDate = classList[count].parentNode.parentNode.parentNode.__vue__.tableData;
+          console.log(tableDate.deadline, tableDate.end);
+          if ((tableDate.deadline || tableDate.end) ? (tableDate.deadline < Date.now() || tableDate.end < Date.now()) : false) {  // 没有该属性默认没有结课
             n_yuketang.alertMessage('第' + (count + 1) + '个：' + classList[count].childNodes[0].childNodes[2].childNodes[0].innerText + '课件结课了，已跳过');
             count++;
             localStorage.setItem(baseUrl, count);
@@ -660,6 +647,7 @@ n_yuketang.main = function () {
                     resolve();
                   }, 3000)
                 })
+                console.log($('.video-box'));
                 if ($('.video-box')) {  // 回头检测如果ppt里面有视频
                   let pptVideo = $('.video-box');
                   n_yuketang.alertMessage('检测到ppt里面有视频，将继续播放视频');
