@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.3.1
+// @version      2.3.2
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      MIT
@@ -18,7 +18,7 @@
   学校：中原工学院，河南大学研究院，广东财经大学，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
-const version = '2.3.1';
+const version = '2.3.2';
 // 视频播放速率,可选值 [1,1.25,1.5,2,3,16],默认为2倍速
 // TODO: 实测 4 倍速往上有可能出现 bug，3 倍速暂时未出现 bug
 let rate = 2;
@@ -29,8 +29,18 @@ const n_yuketang = {};
 
 // 添加用户交互窗口
 n_yuketang.addWindow = function () {
+  // 动态生成类选择器
+  function randomSelector() {
+    const str = ['q', 'w', 'e', 'r', 't', 'y', 'u', 'i', 'o', 'p', 'a', 's', 'd', 'f', 'g', 'h', 'j', 'k', 'l', 'z', 'x', 'c', 'v', 'b', 'n', 'm'];
+    let selector = '';
+    for (let i = 0; i < 6; i++) {
+      selector += str[Math.floor(Math.random() * 26)];
+    }
+    return selector;
+  }
+  const selector = randomSelector();
   // 插入的交互HTML窗口
-  const outerHTML = `<div class="nw_outer">
+  const outerHTML = `<div class="${selector}">
   <div class="n_header">
     雨课堂刷课助手
     <div class='tools'>
@@ -80,7 +90,7 @@ n_yuketang.addWindow = function () {
       height: 100vh;
     }
  
-    .nw_outer {
+    .${selector} {
       margin: 0;
       padding: 0;
       position: fixed;
@@ -273,15 +283,15 @@ n_yuketang.addWindow = function () {
       // 通过判断是否溢出屏幕
       if (left <= 0) {
         left = 0;
-      } else if (left >= clientWidth - $('.nw_outer')[0].offsetWidth) {
-        left = clientWidth - $('.nw_outer')[0].offsetWidth
+      } else if (left >= clientWidth - $(`.${selector}`)[0].offsetWidth) {
+        left = clientWidth - $(`.${selector}`)[0].offsetWidth
       }
       if (top <= 0) {
         top = 0
-      } else if (top >= clientHeight - $('.nw_outer')[0].offsetHeight) {
-        top = clientHeight - $('.nw_outer')[0].offsetHeight
+      } else if (top >= clientHeight - $(`.${selector}`)[0].offsetHeight) {
+        top = clientHeight - $(`.${selector}`)[0].offsetHeight
       }
-      $('.nw_outer').css({
+      $(`.${selector}`).css({
         left: () => {
           return left + 'px';
         },
@@ -308,13 +318,13 @@ n_yuketang.addWindow = function () {
   // 工具类
   $('.minimality').click(function (e) {
     let leftPx = e.clientX + 'px', topPx = e.clientY + 'px';
-    $('.nw_outer').css('z-index', '-9999');
+    $(`.${selector}`).css('z-index', '-9999');
     $('.n_icon').css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
     // 点击事件
     document.querySelector('.n_icon').addEventListener('click', () => {
       console.log(1212);
       $('.n_icon').css('z-index', '-9999');
-      $('.nw_outer').css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
+      $(`.${selector}`).css({ 'top': topPx, 'left': leftPx, 'z-index': '9999' });
     })
   })
   $('.question').click(function () {
