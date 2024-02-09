@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.1
+// @version      2.4.2
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
-// @license      MIT
+// @license      GPL3
 // @match        *://*.yuketang.cn/*
 // @icon         http://niuwh.cn/favicon.ico
 // @grant        GM_addStyle
@@ -16,7 +16,7 @@
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
 const basicConf = {
-  version: '2.4.1',
+  version: '2.4.2',
   rate: 2 // 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
 }
 
@@ -766,6 +766,7 @@ function yukerang_pro_lms_new() {
       localStorage.setItem('pro_lms_classCount', classCount);
       document.querySelector('.btn-next').dispatchEvent(event1);
       document.querySelector('.btn-next').dispatchEvent(new Event('click'));
+      localStorage.setItem('n_type', true);
       main();
     } else {
       localStorage.removeItem('pro_lms_classCount');
@@ -827,21 +828,23 @@ function yukerang_pro_lms_new() {
           }, 2000)
           //防止切出窗口自动暂停  duck123ducker贡献
           function observe() {
-            if (document.getElementsByClassName('play-btn-tip').length === 0) setTimeout(observe, 100);
-            else {
+            if (document.getElementsByClassName('play-btn-tip').length === 0) {
+              setTimeout(observe, 100);
+            } else {
               var targetElement = document.getElementsByClassName('play-btn-tip')[0];
               observer = new MutationObserver(function (mutationsList) {
                 for (var mutation of mutationsList) {
+                  console.log(targetElement.innerText);
                   if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') {
                     const classStatus = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText;
                     if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) playover = true;
-                    if (!playover) document.querySelector('.xt_video_bit_play_btn').click();  // 视频放完了就不模拟点击播放
+                    if (!playover) document.querySelector("video").play();  // 视频放完了就不模拟点击播放
                   }
                 }
               });
               var config = { childList: true };
               observer.observe(targetElement, config);
-              document.querySelector('.xt_video_bit_play_btn').click(); //防止进入下一章时由于鼠标离开窗口而在视频开始时就暂停导致永远无法触发监听器
+              document.querySelector("video").play(); //防止进入下一章时由于鼠标离开窗口而在视频开始时就暂停导致永远无法触发监听器
             }
           }
         } else if (classType.includes('zuoye')) {
@@ -867,12 +870,16 @@ function yukerang_pro_lms_new() {
 // 油猴执行文件
 (function () {
   'use strict';
-  setTimeout(() => {
-    addUserOperate();
-  }, 2000);
-  if (localStorage.getItem('n_type') === 'true') {
-    document.querySelector('#n_button').text = '刷课中~';
-    localStorage.setItem('n_type', false);
-    yukerang_pro_lms_new();
-  }
+  const listenDom = setInterval(() => {
+    if (document.body) {
+      addUserOperate();
+      clearInterval(listenDom);
+    }
+    if (localStorage.getItem('n_type') === 'true') {
+      $.panel.querySelector('#n_button').innerText = '刷课中~';
+      localStorage.setItem('n_type', false);
+      yukerang_pro_lms_new();
+      clearInterval(listenDom);
+    }
+  }, 100)
 })();
