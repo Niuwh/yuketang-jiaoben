@@ -17,7 +17,8 @@
 */
 const basicConf = {
   version: '2.4.2',
-  rate: 2 // 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
+  rate: 2, // 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
+  pptTime: 3000 // ppt播放时间，单位毫秒
 }
 
 const $ = { // 开发脚本的工具对象
@@ -644,6 +645,7 @@ function yuketang_v2() {
             console.log(className);
             if (classType == '课件PPT') {  // 课件为ppt
               let allPPT = document.querySelector('.swiper-wrapper').children;
+              let pptTime = basicConf.pptTime || 3000;
               $.alertMessage(`开始播放${className}`)
               for (let i = 0; i < allPPT.length; i++) {
                 await new Promise(function (resolve) {
@@ -651,13 +653,13 @@ function yuketang_v2() {
                     allPPT[i].click();
                     $.alertMessage(`${className}：第${i + 1}个ppt已经播放`);
                     resolve();
-                  }, 1500)
+                  }, pptTime)
                 })
               }
               await new Promise(function (resolve) {  // 稍微等待
                 setTimeout(function () {
                   resolve();
-                }, 3000)
+                }, pptTime) // 最后一张ppt等待时间
               })
               if (document.querySelector('.video-box')) {  // 回头检测如果ppt里面有视频
                 let pptVideo = document.querySelector('.video-box');
