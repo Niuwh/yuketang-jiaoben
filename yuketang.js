@@ -6,8 +6,9 @@
 // @author       风之子
 // @license      GPL3
 // @match        *://*.yuketang.cn/*
-// @icon         http://niuwh.cn/favicon.ico
-// @grant        GM_addStyle
+// @run-at       document-start
+// @icon         http://yuketang.cn/favicon.ico
+// @grant        unsafeWindow
 // ==/UserScript==
 // 雨课堂刷课脚本
 /*
@@ -15,13 +16,15 @@
   学校：中原工学院，河南大学研究院，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
+
 const basicConf = {
   version: '2.4.2',
   rate: 2 // 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
 }
 
 const $ = { // 开发脚本的工具对象
-  panel: "",  // panel节点，后期赋值
+  panel: "",      // panel节点，后期赋值
+  observer: "",   // 保存observer观察对象
   alertMessage(message) { // 向页面中添加信息
     const li = document.createElement("li");
     li.innerText = message;
@@ -47,6 +50,100 @@ const $ = { // 开发脚本的工具对象
   claim() {   // 视频静音
     document.querySelector("#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon").click();
     $.alertMessage('已开启静音');
+  },
+  observePause() {  // 视频意外暂停，自动播放   duck123ducker贡献
+    var targetElement = document.getElementsByClassName('play-btn-tip')[0]; // 要监听的dom元素
+    if (document.getElementsByClassName('play-btn-tip').length === 0) { // 还未加载出来视频dom时，开启轮回扫描
+      setTimeout(observePause, 100);
+    } else {
+      $.observer = new MutationObserver(function (mutationsList) {
+        for (var mutation of mutationsList) {
+          if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') { // 被监视的元素状态
+            console.log('视频意外暂停了，已恢复播放');
+            document.getElementsByTagName('video')[0].play();
+            $.alertMessage('视频意外暂停了，已恢复播放');
+          }
+        }
+      });
+      var config = { childList: true };
+      $.observer.observe(targetElement, config);
+      document.querySelector("video").play();     //防止进入下一章时由于鼠标离开窗口而在视频开始时就暂停导致永远无法触发监听器
+    }
+  },
+  preventScreenCheck() {  // 阻止雨课堂切屏检测
+    const window = unsafeWindow;
+    const blackList = new Set(["visibilitychange", "blur", "pagehide"]); // 限制调用事件名单：1.选项卡的内容变得可见或被隐藏时2.元素失去焦点3.页面隐藏事件
+    const isDebug = false;
+    const log = console.log.bind(console, "[阻止切屏检测]");
+    const debug = isDebug ? log : () => { };
+    window._addEventListener = window.addEventListener;
+    window.addEventListener = (...args) => {                  // args为剩余参数数组
+      if (!blackList.has(args[0])) {                          // args[0]为想要定义的事件，如果不在限制名单，调用原生函数
+        debug("allow window.addEventListener", ...args);
+        return window._addEventListener(...args);
+      } else {                                                // 否则不执行，打印参数信息
+        log("block window.addEventListener", ...args);
+        return undefined;
+      }
+    };
+    document._addEventListener = document.addEventListener;
+    document.addEventListener = (...args) => {
+      if (!blackList.has(args[0])) {
+        debug("allow document.addEventListener", ...args);
+        return window._addEventListener(...args);
+      } else {
+        log("block document.addEventListener", ...args);
+        return undefined;
+      }
+    };
+    log("addEventListener hooked!");
+    if (isDebug) { // DEBUG ONLY: find out all timers
+      window._setInterval = window.setInterval;
+      window.setInterval = (...args) => {
+        const id = window._setInterval(...args);
+        debug("calling window.setInterval", id, ...args);
+        return id;
+      };
+      debug("setInterval hooked!");
+      window._setTimeout = window.setTimeout;
+      window.setTimeout = (...args) => {
+        const id = window._setTimeout(...args);
+        debug("calling window.setTimeout", id, ...args);
+        return id;
+      };
+      debug("setTimeout hooked!");
+    }
+    Object.defineProperties(document, {
+      hidden: {                 // 表示页面是（true）否（false）隐藏。
+        value: false
+      },
+      visibilityState: {        // 当前可见元素的上下文环境。由此可以知道当前文档 (即为页面) 是在背后，或是不可见的隐藏的标签页
+        value: "visible"        // 此时页面内容至少是部分可见
+      },
+      hasFocus: {               // 表明当前文档或者当前文档内的节点是否获得了焦点
+        value: () => true
+      },
+      onvisibilitychange: {     // 当其选项卡的内容变得可见或被隐藏时，会在 document 上触发 visibilitychange 事件  ==  visibilitychange
+        get: () => undefined,
+        set: () => { }
+      },
+      onblur: {                 // 当元素失去焦点的时候
+        get: () => undefined,
+        set: () => { }
+      }
+    });
+    log("document properties set!");
+    Object.defineProperties(window, {
+      onblur: {
+        get: () => undefined,
+        set: () => { }
+      },
+      onpagehide: {
+        get: () => undefined,
+        set: () => { }
+      },
+    });
+    log("window properties set!");
   }
 }
 
@@ -313,6 +410,7 @@ function addUserOperate() { // 2.添加交互操作
   const miniWindow = panel.previousElementSibling;
   let mouseMoveHander;
   const mouseDownHandler = function (e) {   // 鼠标在header按下处理逻辑
+    e.preventDefault();
     console.log("鼠标按下/////header");
     let innerLeft = e.offsetX,
       innerTop = e.offsetY;
@@ -434,37 +532,17 @@ function yuketang_v2() {
       console.log(classInfo);
       if (count === list.length && play === true) {            // 结束
         $.alertMessage('课程刷完了');
-        $.panel.querySelector('#n_button').text('刷完了~');
+        $.panel.querySelector('#n_button').innerText = '刷完了~';
         localStorage.setItem(baseUrl, 0);
         return;
       } else if (classInfo?.includes('shipin') && play === true) { // 视频处理
         play = false;
-        let observer;
-        // 意外暂停之后恢复播放
-        function observe() {
-          var targetElement = document.getElementsByClassName('play-btn-tip')[0]; // 要监听的dom元素
-          if (document.getElementsByClassName('play-btn-tip').length === 0) { // 还未加载出来视频dom时，开启轮回扫描
-            setTimeout(observe, 100);
-          } else {
-            observer = new MutationObserver(function (mutationsList) {
-              for (var mutation of mutationsList) {
-                if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') { // 被监视的元素状态
-                  console.log('视频意外暂停了，已恢复播放');
-                  document.getElementsByTagName('video')[0].play();
-                  $.alertMessage('视频意外暂停了，已恢复播放');
-                }
-              }
-            });
-            var config = { childList: true };
-            observer.observe(targetElement, config);
-          }
-        }
         classList[count].click();
         setTimeout(() => {
           $.alertMessage('第' + (count + 1) + '个：进入了视频区');
           $.ykt_speed();
           $.claim();
-          observe();
+          $.observePause();
           let progress = document.querySelector('.progress-wrap').querySelector('.text');
           let timer1 = setInterval(() => {
             console.log(progress);
@@ -472,8 +550,8 @@ function yuketang_v2() {
               count++;
               localStorage.setItem(baseUrl, count);
               play = true;
-              if (!!observer) { // 防止oberver为undefined.
-                observer.disconnect();  // 视频播放完了，停止监听
+              if (!!$.observer) {         // 防止oberver为undefined(网速卡导致视频没加载出来，observer为空)
+                $.observer.disconnect();  // 视频播放完了，停止监听
               }
               history.back();
               main();
@@ -495,26 +573,6 @@ function yuketang_v2() {
             let count1 = localStorage.getItem('userCount');
             bofang();
             function bofang() {
-              let observer;
-              // 意外暂停之后恢复播放
-              function observe() {
-                var targetElement = document.getElementsByClassName('play-btn-tip')[0]; // 要监听的dom元素
-                if (document.getElementsByClassName('play-btn-tip').length === 0) { // 还未加载出来视频dom时，开启轮回扫描
-                  setTimeout(observe, 100);
-                } else {
-                  observer = new MutationObserver(function (mutationsList) {
-                    for (var mutation of mutationsList) {
-                      if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') { // 被监视的元素状态
-                        console.log('视频意外暂停了，已恢复播放');
-                        document.getElementsByTagName('video')[0].play();
-                        $.alertMessage('视频意外暂停了，已恢复播放');
-                      }
-                    }
-                  });
-                  var config = { childList: true };
-                  observer.observe(targetElement, config);
-                }
-              }
               let classInfo1 = a[count1]?.querySelector('.tag').querySelector('use').getAttribute('xlink:href');
               let play = true;
               if (classInfo1?.includes('shipin') && play === true) {
@@ -524,7 +582,7 @@ function yuketang_v2() {
                 // 延迟3秒后加速
                 setTimeout(() => {
                   $.ykt_speed();
-                  observe();
+                  $.observePause();
                   $.claim();
                 }, 3000);
                 let timer = setInterval(() => {
@@ -534,8 +592,8 @@ function yuketang_v2() {
                     localStorage.setItem('userCount', count1);
                     clearInterval(timer);
                     $.alertMessage(`视频播放完毕`);
-                    if (!!observer) { // 防止oberver为undefined.
-                      observer.disconnect();  // 视频播放完了，停止监听
+                    if (!!$.observer) { // 防止oberver为undefined.
+                      $.observer.disconnect();  // 视频播放完了，停止监听
                     }
                     history.back();
                     setTimeout(() => {
@@ -794,8 +852,6 @@ function yukerang_pro_lms_new() {
           }, 2000)
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
           $.alertMessage(`正在播放：${className}`);
-          let playover = false; // 代表视频没播放完毕
-          var observer;
           setTimeout(() => {
             // 监测视频播放状态
             let timer = setInterval(() => {
@@ -804,7 +860,7 @@ function yukerang_pro_lms_new() {
                 $.alertMessage(`${className}播放完毕...`);
                 clearInterval(timer);
                 if (!!observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
-                  observer.disconnect();  // 停止监听
+                  $.observer.disconnect();  // 停止监听
                 }
                 resolve();
               }
@@ -817,7 +873,7 @@ function yukerang_pro_lms_new() {
                 setTimeout(() => {  // 防止视频刚加载出来，就加速，出现无法获取到元素地bug
                   $.ykt_speed();
                   $.claim();
-                  observe();
+                  $.observePause();
                   clearInterval(videoTimer);
                 }, 2000)
               } else if (!video && Date.now() - nowTime > 20000) {  // 如果20s内仍未加载出video
@@ -826,27 +882,6 @@ function yukerang_pro_lms_new() {
               }
             }, 5000)
           }, 2000)
-          //防止切出窗口自动暂停  duck123ducker贡献
-          function observe() {
-            if (document.getElementsByClassName('play-btn-tip').length === 0) {
-              setTimeout(observe, 100);
-            } else {
-              var targetElement = document.getElementsByClassName('play-btn-tip')[0];
-              observer = new MutationObserver(function (mutationsList) {
-                for (var mutation of mutationsList) {
-                  console.log(targetElement.innerText);
-                  if (mutation.type === 'childList' && mutation.target === targetElement && targetElement.innerText === '播放') {
-                    const classStatus = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText;
-                    if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%')) playover = true;
-                    if (!playover) document.querySelector("video").play();  // 视频放完了就不模拟点击播放
-                  }
-                }
-              });
-              var config = { childList: true };
-              observer.observe(targetElement, config);
-              document.querySelector("video").play(); //防止进入下一章时由于鼠标离开窗口而在视频开始时就暂停导致永远无法触发监听器
-            }
-          }
         } else if (classType.includes('zuoye')) {
           $.alertMessage(`进入：${className}，目前没有自动作答功能，敬请期待...`);
           setTimeout(() => {
@@ -873,12 +908,11 @@ function yukerang_pro_lms_new() {
   const listenDom = setInterval(() => {
     if (document.body) {
       addUserOperate();
-      clearInterval(listenDom);
-    }
-    if (localStorage.getItem('n_type') === 'true') {
-      $.panel.querySelector('#n_button').innerText = '刷课中~';
-      localStorage.setItem('n_type', false);
-      yukerang_pro_lms_new();
+      if (localStorage.getItem('n_type') === 'true') {
+        $.panel.querySelector('#n_button').innerText = '刷课中~';
+        localStorage.setItem('n_type', false);
+        yukerang_pro_lms_new();
+      }
       clearInterval(listenDom);
     }
   }, 100)
