@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.2
+// @version      2.4.3
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,9 +18,9 @@
 */
 
 const basicConf = {
-  version: '2.4.2',
-  rate: 2, // 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
-  pptTime: 3000 // ppt播放时间，单位毫秒
+  version: '2.4.3',
+  rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
+  pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒  
 }
 
 const $ = { // 开发脚本的工具对象
