@@ -32,5 +32,6 @@
 ### 贡献者名单：
 + duck123ducker     解决了雨课堂进入后台意外暂停的bug
 + insorker          增加错误页面匹配提醒 && 修改倍速函数，支持3倍速
++ PRO-2684          解决了pro/lms路线雨课堂切屏检测问题
 
 如有任何问题或提议，欢迎大家访问我的网站：[https://niuwh.cn](https://niuwh.cn) ,里面有我的联系方式。或者博客留言：[https://blog.niuwh.cn](https://blog.niuwh.cn)。

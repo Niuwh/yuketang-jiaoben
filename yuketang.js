@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.3
+// @version      2.4.4
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,7 +18,7 @@
 */
 
 const basicConf = {
-  version: '2.4.3',
+  version: '2.4.4',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒  
 }
@@ -71,11 +71,11 @@ const $ = { // 开发脚本的工具对象
       document.querySelector("video").play();     //防止进入下一章时由于鼠标离开窗口而在视频开始时就暂停导致永远无法触发监听器
     }
   },
-  preventScreenCheck() {  // 阻止雨课堂切屏检测
+  preventScreenCheck() {  // 阻止pro/lms雨课堂切屏检测  PRO-2684贡献
     const window = unsafeWindow;
     const blackList = new Set(["visibilitychange", "blur", "pagehide"]); // 限制调用事件名单：1.选项卡的内容变得可见或被隐藏时2.元素失去焦点3.页面隐藏事件
     const isDebug = false;
-    const log = console.log.bind(console, "[阻止切屏检测]");
+    const log = console.log.bind(console, "[阻止pro/lms切屏检测]");
     const debug = isDebug ? log : () => { };
     window._addEventListener = window.addEventListener;
     window.addEventListener = (...args) => {                  // args为剩余参数数组
@@ -818,6 +818,7 @@ function yukerang_pro_lms() {
 
 // yuketang.cn/pro/lms新页面的刷课逻辑
 function yukerang_pro_lms_new() {
+  $.preventScreenCheck();
   function nextCount(classCount) {
     event1 = new Event('mousemove', { bubbles: true });
     event1.clientX = 9999;
@@ -861,7 +862,7 @@ function yukerang_pro_lms_new() {
               if (classStatus.includes('100%') || classStatus.includes('99%') || classStatus.includes('98%') || classStatus.includes('已完成')) {
                 $.alertMessage(`${className}播放完毕...`);
                 clearInterval(timer);
-                if (!!observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
+                if (!!$.observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
                   $.observer.disconnect();  // 停止监听
                 }
                 resolve();
