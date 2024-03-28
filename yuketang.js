@@ -476,7 +476,7 @@ function addUserOperate() { // 2.添加交互操作
   miniWindow.addEventListener("click", minimalityHander);
   // 有问题按钮
   question.onclick = function () {
-    alert('作者网站：niuwh.cn' + '    ' + 'QQ反馈交流群：384302095');
+    alert('备考中，时间精力有限，暂时不再更新了...');
   };
   // 鼠标移入窗口，暂停自动滚动
   (function () {
@@ -583,8 +583,8 @@ function yuketang_v2() {
                 // 延迟3秒后加速
                 setTimeout(() => {
                   $.ykt_speed();
-                  $.observePause();
                   $.claim();
+                  $.observePause();
                 }, 3000);
                 let timer = setInterval(() => {
                   let progress = document.querySelector('.progress-wrap').querySelector('.text');
