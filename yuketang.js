@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.5
+// @version      2.4.6
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,7 +18,7 @@
 */
 
 const basicConf = {
-  version: '2.4.5',
+  version: '2.4.6',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -738,7 +738,7 @@ function yuketang_v2() {
                 }, pptTime) // 最后一张ppt等待时间
               })
               if (document.querySelector('.video-box')) {  // 回头检测如果ppt里面有视频
-                let pptVideo = document.querySelector('.video-box');
+                let pptVideo = document.querySelectorAll('.video-box');
                 $.alertMessage('检测到ppt里面有视频，将继续播放视频');
                 for (let i = 0; i < pptVideo.length; i++) {
                   if (document.querySelectorAll('.video-box')[i].innerText != '已完成') {   // 判断视频是否已播放
@@ -748,6 +748,7 @@ function yuketang_v2() {
                       setTimeout(function () {
                         $.ykt_speed();  // 加速
                         document.querySelector('.xt_video_player_common_icon').click();  // 静音
+                        $.observePause(); // 防止切屏自动暂停
                         resolve();
                       }, 3000)
                     })
@@ -760,6 +761,9 @@ function yuketang_v2() {
                         console.log(nowTime + totalTime);
                         if (nowTime == totalTime) {
                           clearInterval(timer);
+                          if (!!$.observer) {  // 防止新的视频已经播放完了，还未来得及赋值observer的问题
+                            $.observer.disconnect();  // 停止监听
+                          }
                           resolve();
                         }
                       }, 200);
@@ -872,7 +876,7 @@ function yukerang_pro_lms_new() {
             resolve();
           }, 2000)
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
-          $.alertMessage(`正在播放：${className}`);
+          $.alertMessage(`7s后开始播放：${className}`);
           setTimeout(() => {
             // 监测视频播放状态
             let timer = setInterval(() => {
