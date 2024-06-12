@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.6
+// @version      2.4.7
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,7 +18,7 @@
 */
 
 const basicConf = {
-  version: '2.4.6',
+  version: '2.4.7',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -74,6 +74,12 @@ const $ = { // 开发脚本的工具对象
   claim() {   // 视频静音
     document.querySelector("#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon").click();
     $.alertMessage('已开启静音');
+  },
+  audioDetail() {   // 音频处理
+    document.querySelector('audio').play();
+    document.querySelector('audio').volume = 0;
+    document.querySelector('audio').playbackRate = basicConf.rate;
+    $.alertMessage(`已默认静音和${basicConf.rate}倍速`);
   },
   observePause() {  // 视频意外暂停，自动播放   duck123ducker贡献
     var targetElement = document.getElementsByClassName('play-btn-tip')[0]; // 要监听的dom元素
@@ -593,16 +599,47 @@ function yuketang_v2() {
             bofang();
             function bofang() {
               let play = true;
+              let classInfo1;
+              let videotitle, audiotitle;
               if (count1 === a.length && play === true) {
                 $.alertMessage('合集播放完毕');
                 count++;
                 $.userInfo.setProgress(baseUrl, count);
                 main();
               }
-              let classInfo1 = a[count1]?.querySelector('.tag').querySelector('use').getAttribute('xlink:href');
-              const videotitle = a[count1].querySelector("h2").innerText;
-              console.log(count1);
-              if (classInfo1?.includes('shipin') && play === true) {
+              console.log(a[count1]?.querySelector('.tag').innerText);
+              if (a[count1]?.querySelector('.tag').innerText === '音频') {
+                classInfo1 = "音频";
+                audiotitle = a[count1]?.querySelector("h2").innerText;
+              } else {    // 不是音频
+                classInfo1 = a[count1]?.querySelector('.tag').querySelector('use').getAttribute('xlink:href');
+                videotitle = a[count1].querySelector("h2").innerText;
+                console.log(classInfo1);
+              }
+              if (classInfo1 = "音频" && play === true) {
+                play = false;
+                a[count1].click();
+                $.alertMessage(`开始播放:${audiotitle}`);
+                setTimeout(() => {
+                  $.audioDetail();
+                }, 3000);
+                let timer = setInterval(() => {
+                  let progress = document.querySelector('.progress-wrap').querySelector('.text');
+                  if (document.querySelector('audio').paused) {
+                    document.querySelector('audio').play();
+                  }
+                  if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%') || progress.innerHTML.includes('已完成')) {
+                    count1++;
+                    $.userInfo.setProgress(baseUrl, count, count1);
+                    clearInterval(timer);
+                    $.alertMessage(`${audiotitle}播放完毕`);
+                    history.back();
+                    setTimeout(() => {
+                      bofang();
+                    }, 2000);
+                  }
+                }, 3000)
+              } else if (classInfo1?.includes('shipin') && play === true) {
                 play = false;
                 a[count1].click();
                 $.alertMessage(`开始播放:${videotitle}`);
