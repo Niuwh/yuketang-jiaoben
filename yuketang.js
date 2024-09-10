@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.8
+// @version      2.4.9
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,7 +18,7 @@
 */
 
 const basicConf = {
-  version: '2.4.8',
+  version: '2.4.9',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -872,7 +872,13 @@ function yukerang_pro_lms() {
   $.alertMessage('正准备打开新标签页...');
   localStorage.getItem('pro_lms_classCount') ? null : localStorage.setItem('pro_lms_classCount', 1);  // 初始化集数
   let classCount = localStorage.getItem('pro_lms_classCount') - 1;
-  document.querySelectorAll('.leaf-detail')[classCount].click();  // 进入第一个课程，启动脚本
+  let leafDetail = document.querySelectorAll('.leaf-detail');     // 课程列表
+  while (!leafDetail[classCount].firstChild.querySelector('i').className.includes('shipin')) {
+    classCount++;
+    localStorage.setItem('pro_lms_classCount', classCount);
+    $.alertMessage('课程不属于视频，已跳过^_^');
+  };
+  document.querySelectorAll('.leaf-detail')[classCount].click();  // 进入第一个【视频】课程，启动脚本
 }
 
 // yuketang.cn/pro/lms新页面的刷课逻辑
@@ -946,6 +952,16 @@ function yukerang_pro_lms_new() {
           }, 2000)
         } else if (classType.includes('zuoye')) {
           $.alertMessage(`进入：${className}，目前没有自动作答功能，敬请期待...`);
+          setTimeout(() => {
+            resolve();
+          }, 2000)
+        } else if (classType.includes('kaoshi')) {
+          $.alertMessage(`进入：${className}，目前没有自动考试功能，敬请期待...`);
+          setTimeout(() => {
+            resolve();
+          }, 2000)
+        } else if (classType.includes('ketang')) {
+          $.alertMessage(`进入：${className}，目前没有课堂作答功能，敬请期待...`);
           setTimeout(() => {
             resolve();
           }, 2000)
