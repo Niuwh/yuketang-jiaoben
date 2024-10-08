@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.9
+// @version      2.4.10
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,7 +18,7 @@
 */
 
 const basicConf = {
-  version: '2.4.9',
+  version: '2.4.10',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -79,7 +79,7 @@ const $ = { // 开发脚本的工具对象
     document.querySelector('audio').play();
     document.querySelector('audio').volume = 0;
     document.querySelector('audio').playbackRate = basicConf.rate;
-    $.alertMessage(`已默认静音和${basicConf.rate}倍速`);
+    $.alertMessage(`实际上已默认静音和${basicConf.rate}倍速`);
   },
   observePause() {  // 视频意外暂停，自动播放   duck123ducker贡献
     var targetElement = document.getElementsByClassName('play-btn-tip')[0]; // 要监听的dom元素
@@ -704,8 +704,9 @@ function yuketang_v2() {
               }
               // 内容为音频的逻辑
               if (document.querySelector('audio')) {
+                $.audioDetail();
                 function isComplate() {
-                  let mainArea = document.querySelector('.n_yuketang.mainArea');
+                  let mainArea = document.querySelector('.mainArea');
                   let currentTime = mainArea.querySelectorAll('span')[0].innerHTML.toString();
                   let totalTime = mainArea.querySelectorAll('span')[1].innerHTML.toString();
                   if (currentTime == totalTime || currentTime == '00:00' || currentTime == '00:00:00') {
@@ -789,7 +790,6 @@ function yuketang_v2() {
                         resolve();
                       }, 3000)
                     })
-                    $.alertMessage('已开启二倍速，且自动静音');
                     await new Promise(function (resolve) {
                       let timer = setInterval(function () {
                         let allTime = document.querySelector('.xt_video_player_current_time_display').innerText;
@@ -821,7 +821,6 @@ function yuketang_v2() {
                   resolve();
                 }, 3000)
               })  // 3秒后加速,静音
-              $.alertMessage('已开启二倍速，且自动静音');
               await new Promise(function (resolve) {
                 let timer = setInterval(function () {
                   let allTime = document.querySelector('.xt_video_player_current_time_display').innerText;
