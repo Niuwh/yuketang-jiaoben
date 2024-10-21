@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.10
+// @version      2.4.11
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,7 +18,7 @@
 */
 
 const basicConf = {
-  version: '2.4.10',
+  version: '2.4.11',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -74,6 +74,12 @@ const $ = { // 开发脚本的工具对象
   claim() {   // 视频静音
     document.querySelector("#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon").click();
     $.alertMessage('已开启静音');
+  },
+  videoDetail() {  // 不用鼠标模拟操作就能实现的一般视频加速静音方法
+    document.querySelector('video').play();
+    document.querySelector('video').volume = 0;
+    document.querySelector('video').playbackRate = basicConf.rate;
+    $.alertMessage(`实际上已默认静音和${basicConf.rate}倍速`);
   },
   audioDetail() {   // 音频处理
     document.querySelector('audio').play();
@@ -425,6 +431,7 @@ function addWindow() {  // 1.添加交互窗口
   document.body.append(div);
   const shadowroot = div.attachShadow({ mode: 'closed' });
   shadowroot.innerHTML = html;
+  console.log("已插入使用面板");
   $.panel = shadowroot.lastElementChild.lastElementChild; // 保存panel节点
   return $.panel;  // 返回panel根容器
 }
@@ -685,6 +692,7 @@ function yuketang_v2() {
             setTimeout(() => {
               // 内容为视频的逻辑
               if (document.querySelector('video')) {
+                $.videoDetail();
                 function isComplate() {
                   let videoTime = document.querySelector('.video__time').innerHTML.toString();
                   let currentTime = videoTime.split('/')[0];
@@ -982,6 +990,9 @@ function yukerang_pro_lms_new() {
 // 油猴执行文件
 (function () {
   'use strict';
+  // window.addEventListener('load', (event) => {    // 用于检测页面是否已经完全正常加载出来
+  //   console.log(('页面成功加载出来了'));
+  // })
   const listenDom = setInterval(() => {
     if (document.body) {
       addUserOperate();
