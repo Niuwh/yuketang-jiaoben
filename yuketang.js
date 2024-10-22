@@ -1,11 +1,12 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.11
+// @version      2.4.12
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
 // @match        *://*.yuketang.cn/*
+// @match        *://*.gdufemooc.cn/*
 // @run-at       document-start
 // @icon         http://yuketang.cn/favicon.ico
 // @grant        unsafeWindow
@@ -18,7 +19,7 @@
 */
 
 const basicConf = {
-  version: '2.4.11',
+  version: '2.4.12',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -537,7 +538,7 @@ function start() {  // 脚本入口函数
   const pathName = location.pathname.split('/');
   const matchURL = url + pathName[0] + '/' + pathName[1] + '/' + pathName[2];
   $.alertMessage(`正在为您匹配${matchURL}的处理逻辑...`);
-  if (matchURL.includes('yuketang.cn/v2/web')) {
+  if (matchURL.includes('yuketang.cn/v2/web') || matchURL.includes('gdufemooc.cn/v2/web')) {
     yuketang_v2();
   } else if (matchURL.includes('yuketang.cn/pro/lms')) {
     yukerang_pro_lms();
