@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.12
+// @version      2.4.14
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -19,7 +19,7 @@
 */
 
 const basicConf = {
-  version: '2.4.12',
+  version: '2.4.14',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -540,8 +540,8 @@ function start() {  // 脚本入口函数
   $.alertMessage(`正在为您匹配${matchURL}的处理逻辑...`);
   if (matchURL.includes('yuketang.cn/v2/web') || matchURL.includes('gdufemooc.cn/v2/web')) {
     yuketang_v2();
-  } else if (matchURL.includes('yuketang.cn/pro/lms')) {
-    yukerang_pro_lms();
+  } else if (matchURL.includes('yuketang.cn/pro/lms') || matchURL.includes('gdufemooc.cn/pro/lms')) {
+    yuketang_pro_lms();
   } else {
     $.panel.querySelector("button").innerText = "开始刷课";
     $.alertMessage(`这不是刷课的页面哦，刷课页面的网址应该匹配 */v2/web/* 或 */pro/lms/*`)
@@ -573,14 +573,19 @@ function yuketang_v2() {
         course.click(); // 进入课程
         setTimeout(() => {
           let progress = document.querySelector('.progress-wrap').querySelector('.text');   // 课程进度
+          let deadline = false;   // 课程是否到了截止日期
           const title = document.querySelector(".title").innerText;   // 课程标题
           $.alertMessage(`正在播放：${title}`);
+          if (document.querySelector('.box').innerText.includes('已过考核截止时间')) {
+            deadline = true;
+            $.alertMessage(`${title}已经过了截至日期，进度不再增加，将跳过~`);
+          }
           $.ykt_speed();
           $.claim();
           $.observePause();
           let timer1 = setInterval(() => {
-            console.log(progress);
-            if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%') || progress.innerHTML.includes('已完成')) {
+            // console.log(progress);
+            if (progress.innerHTML.includes('100%') || progress.innerHTML.includes('99%') || progress.innerHTML.includes('98%') || progress.innerHTML.includes('已完成') || deadline) {
               count++;
               $.userInfo.setProgress(baseUrl, count);
               play = true;
@@ -833,8 +838,8 @@ function yuketang_v2() {
               await new Promise(function (resolve) {
                 let timer = setInterval(function () {
                   let allTime = document.querySelector('.xt_video_player_current_time_display').innerText;
-                  nowTime = allTime.split(' / ')[0];
-                  totalTime = allTime.split(' / ')[1]
+                  let nowTime = allTime.split(' / ')[0];
+                  let totalTime = allTime.split(' / ')[1]
                   console.log(nowTime + totalTime);
                   if (nowTime == totalTime) {
                     clearInterval(timer);
@@ -875,7 +880,7 @@ function yuketang_v2() {
 }
 
 // yuketang.cn/pro/lms旧页面的跳转逻辑
-function yukerang_pro_lms() {
+function yuketang_pro_lms() {
   localStorage.setItem('n_type', true);
   $.alertMessage('正准备打开新标签页...');
   localStorage.getItem('pro_lms_classCount') ? null : localStorage.setItem('pro_lms_classCount', 1);  // 初始化集数
@@ -890,7 +895,7 @@ function yukerang_pro_lms() {
 }
 
 // yuketang.cn/pro/lms新页面的刷课逻辑
-function yukerang_pro_lms_new() {
+function yuketang_pro_lms_new() {
   $.preventScreenCheck();
   function nextCount(classCount) {
     event1 = new Event('mousemove', { bubbles: true });
@@ -1000,7 +1005,7 @@ function yukerang_pro_lms_new() {
       if (localStorage.getItem('n_type') === 'true') {
         $.panel.querySelector('#n_button').innerText = '刷课中~';
         localStorage.setItem('n_type', false);
-        yukerang_pro_lms_new();
+        yuketang_pro_lms_new();
       }
       clearInterval(listenDom);
     }
