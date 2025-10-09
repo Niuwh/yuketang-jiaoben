@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.14
+// @version      2.4.15
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -19,7 +19,7 @@
 */
 
 const basicConf = {
-  version: '2.4.14',
+  version: '2.4.15',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -76,16 +76,16 @@ const $ = { // 开发脚本的工具对象
     document.querySelector("#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon").click();
     $.alertMessage('已开启静音');
   },
-  videoDetail() {  // 不用鼠标模拟操作就能实现的一般视频加速静音方法
-    document.querySelector('video').play();
-    document.querySelector('video').volume = 0;
-    document.querySelector('video').playbackRate = basicConf.rate;
+  videoDetail(video = document.querySelector('video')) {  // 不用鼠标模拟操作就能实现的一般视频加速静音方法
+    video.play();
+    video.volume = 0;
+    video.playbackRate = basicConf.rate;
     $.alertMessage(`实际上已默认静音和${basicConf.rate}倍速`);
   },
-  audioDetail() {   // 音频处理
-    document.querySelector('audio').play();
-    document.querySelector('audio').volume = 0;
-    document.querySelector('audio').playbackRate = basicConf.rate;
+  audioDetail(audio = document.querySelector('audio')) {   // 音频处理
+    audio.play();
+    audio.volume = 0;
+    audio.playbackRate = basicConf.rate;
     $.alertMessage(`实际上已默认静音和${basicConf.rate}倍速`);
   },
   observePause() {  // 视频意外暂停，自动播放   duck123ducker贡献
@@ -692,59 +692,49 @@ function yuketang_v2() {
         play = false;
         course.click();
         setTimeout(() => {
-          let playBack = document.querySelector('.playback');
-          if (playBack) { // 存在回放按钮时进入详情页
-            playBack.click();
-            setTimeout(() => {
-              // 内容为视频的逻辑
-              if (document.querySelector('video')) {
-                $.videoDetail();
-                function isComplate() {
-                  let videoTime = document.querySelector('.video__time').innerHTML.toString();
-                  let currentTime = videoTime.split('/')[0];
-                  let totalTime = videoTime.split('/')[1];
-                  if (currentTime == totalTime || currentTime == '00:00' || currentTime == '00:00:00') {
-                    count++;
-                    $.userInfo.setProgress(baseUrl, count);
-                    play = true;
-                    history.go(-2);
-                    main();
-                    clearInterval(timer);
-                  }
-                }
-                let timer = setInterval(() => {
-                  isComplate();
-                }, 10000)
-              }
-              // 内容为音频的逻辑
-              if (document.querySelector('audio')) {
-                $.audioDetail();
-                function isComplate() {
-                  let mainArea = document.querySelector('.mainArea');
-                  let currentTime = mainArea.querySelectorAll('span')[0].innerHTML.toString();
-                  let totalTime = mainArea.querySelectorAll('span')[1].innerHTML.toString();
-                  if (currentTime == totalTime || currentTime == '00:00' || currentTime == '00:00:00') {
-                    count++;
-                    $.userInfo.setProgress(baseUrl, count);
-                    play = true;
-                    history.go(-2);
-                    main();
-                    clearInterval(timer);
-                  }
-                }
-                let timer = setInterval(() => {
-                  isComplate();
-                }, 10000)
-              }
-            }, 3000)
-          } else {   // 不存在回放按钮时退出
+
+          async function waitForVideoEnd(video) {
+            return new Promise((resolve) => {
+              if (video.ended) return resolve();
+              video.addEventListener("ended", () => {
+                $.alertMessage("课堂视频看完了~")
+                resolve()
+              }, { once: true });
+            });
+          }
+
+          async function waitForAudioEnd(audio) {
+            return new Promise((resolve) => {
+              if (audio.ended) return resolve();
+              audio.addEventListener("ended", () => resolve(), { once: true });
+            });
+          }
+
+          async function mainFlow() {
+            //  !!! documen获取不到内嵌的iframe框架里面的dom，浪费了我好长时间来测试，特此记录
+            video = document.querySelector('iframe.lesson-report-mobile').contentDocument.querySelector("video");
+            audio = document.querySelector('iframe.lesson-report-mobile').contentDocument.querySelector("audio");
+
+            if (video) {
+              $.videoDetail(video);
+              $.alertMessage("获取到video");
+              await waitForVideoEnd(video);
+            }
+            if (audio) {
+              $.alertMessage("获取到audio");
+              $.audioDetail(audio);
+              await waitForAudioEnd(audio);
+            }
+            console.log("没有视频或音频了");
             count++;
             $.userInfo.setProgress(baseUrl, count);
             play = true;
             history.go(-1);
             main();
+
           }
-        }, 3000)
+          mainFlow();
+        }, 5000)
       } else if (classInfo?.includes('kejian') && play === true) {  // 课件处理
         const tableDate = course.parentNode.parentNode.parentNode.__vue__.tableData;
         console.log(tableDate.deadline, tableDate.end);
