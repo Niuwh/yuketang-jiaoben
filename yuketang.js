@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.15
+// @version      2.4.16
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -18,6 +18,8 @@
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
 
+
+const _attachShadow = Element.prototype.attachShadow;
 const basicConf = {
   version: '2.4.15',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
@@ -183,354 +185,217 @@ const $ = { // 开发脚本的工具对象
     log("window properties set!");
   }
 }
+window.$ = $;
+window.start = start;
 
-function addWindow() {  // 1.添加交互窗口
-  const css = `
-  ul,
-  li,
-  p {
-    margin: 0;
-    padding: 0;
-  }
-  .mini-basic{
-    position: fixed;
-    top: 0;
-    left: 0;
-    background:#f5f5f5;
-    border:1px solid #000;
-    height:50px;
-    width:50px;
-    border-radius:6px;
-    text-align:center;
-    line-height:50px;
-  }
-  .miniwin{
-    z-index:-9999;
-  }
+function addWindow() {
+  // 创建iframe
+  const iframe = document.createElement('iframe');
+  iframe.style.position = 'fixed';
+  iframe.style.top = '40px';
+  iframe.style.left = '40px';
+  iframe.style.width = '500px';
+  iframe.style.height = '250px';
+  iframe.style.zIndex = '999999';
+  iframe.style.border = '1px solid #a3a3a3';
+  iframe.style.borderRadius = '10px';
+  iframe.style.background = '#fff';
+  iframe.style.boxShadow = '6px 4px 17px 2px #000000';
+  iframe.setAttribute('frameborder', '0');
+  iframe.setAttribute('id', 'ykt-helper-iframe');
+  iframe.setAttribute('allowtransparency', 'true');
+  document.body.appendChild(iframe);
 
-  .n_panel {
-    margin: 0;
-    padding: 0;
-    position: fixed;
-    top: 0;
-    left: 0;
-    width: 500px;
-    height: 250px;
-    background-color: #fff;
-    z-index: 99999;
-    box-shadow: 6px 4px 17px 2px #000000;
-    border-radius: 10px;
-    border: 1px solid #a3a3a3;
-    font-family: Avenir, Helvetica, Arial, sans-serif;
-    color: #636363;
-  }
-  
-  .hide{
-    display:none;
-  }
-
-  .n_header {
-    text-align: center;
-    height: 40px;
-    background-color: #f7f7f7;
-    color: #000;
-    font-size: 18px;
-    line-height: 40px;
-    cursor: move;
-    border-radius: 10px 10px 0 0;
-    border-bottom: 2px solid #eee;
-  }
-
-  .n_header .tools{
-    position:absolute;
-    right:0;
-    top:0;
-  }
-
-  .n_header .tools ul li{
-    position:relative;
-    display:inline-block;
-    padding:0 5px;
-    cursor:pointer;
-  }
-
-  .n_header .minimality::after{
-    content:'最小化';
-    display:none;
-    position:absolute;
-    left:0;
-    bottom:-30px;
-    height:32px;
-    width:50px;
-    font-size:12px;
-    background:#ffffe1;
-    color:#000;
-    border-radius:3px;
-  }
-
-  .n_header .minimality:hover::after{
-    display:block;
-  }
-  
-  .n_header .question::after{
-    content:'有问题';
-    display:none;
-    position:absolute;
-    left:0;
-    bottom:-30px;
-    height:32px;
-    width:50px;
-    font-size:12px;
-    background:#ffffe1;
-    color:#000;
-    border-radius:3px;
-  }
-
-  .n_header .question:hover::after{
-    display:block;
-  }
-
-  .n_body {
-    font-weight: bold;
-    font-size: 13px;
-    line-height: 26px;
-    height: 183px;
-  }
-
-  .n_body .n_infoAlert {
-    overflow-y: scroll;
-    height: 100%;
-  }
-
-  /* 滚动条整体 */
-  .n_body .n_infoAlert::-webkit-scrollbar {
-    height: 20px;
-    width: 7px;
-  }
-
-  /* 滚动条轨道 */
-  .n_body .n_infoAlert::-webkit-scrollbar-track {
-    --webkit-box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.2);
-    border-radius: 10px;
-    background: #ffffff;
-  }
-
-  /* 滚动条滑块 */
-  .n_body .n_infoAlert::-webkit-scrollbar-thumb {
-    border-radius: 10px;
-    --webkit-box-shadow: inset 0 0 5px rgba(0, 0, 0, 0.2);
-    background: rgb(20, 19, 19, 0.6);
-  }
-
-  .n_footer {
-    position: absolute;
-    bottom: 0;
-    left: 0;
-    text-align: right;
-    height: 25px;
-    width: 100%;
-    background-color: #f7f7f7;
-    color: #c5c5c5;
-    font-size: 13px;
-    line-height: 25px;
-    border-radius: 0 0 10px 10px;
-    border-bottom: 2px solid #eee;
-    display: flex;
-    justify-content: space-between;
-  }
-
-  .n_footer #n_button {
-    border-radius: 6px;
-    border: 0;
-    background-color: blue;
-    color: #fff;
-    cursor: pointer;
-  }
-
-  .n_footer #n_button:hover {
-    background-color: yellow;
-    color: #000;
-  }
-
-  .n_footer #n_clear{
-    border-radius: 6px;
-    border: 0;
-    cursor: pointer;
-  }
-
-  .n_footer #n_clear::after{
-    content:'用于清除课程进度缓存';
-    display:none;
-    position:absolute;
-    left:250px;
-    bottom:-30px;
-    height:32px;
-    width:100px;
-    font-size:12px;
-    background:#ffffe1;
-    color:#000;
-    border-radius:3px;
-  }
-
-  .n_footer #n_clear:hover::after{
-    display:block;
-  }
-
-  .n_footer #n_zanshang {
-    cursor: pointer;
-    position: relative;
-    color: red;
-  }
-
-  .n_footer #n_zanshang img {
-    position: absolute;
-    top: 30px;
-    left: -130px;
-    display: none;
-    width: 300px;
-  }
-
-  .n_footer #n_zanshang:hover img {
-    display: block;
-  }
-  `;
-  const html = `
-  <div>
-  <style>${css}</style>
-  <div class="mini-basic miniwin">
-      放大
-  </div>
-  <div class="n_panel">
-  <div class="n_header">
-    雨课堂刷课助手
-    <div class='tools'>
-      <ul>
-        <li class='minimality'>_</li>
-        <li class='question'>?</li>
-      </ul>
+  // iframe内容
+  const doc = iframe.contentDocument || iframe.contentWindow.document;
+  doc.open();
+  doc.write(`
+    <style>
+      body { margin:0; font-family: Avenir, Helvetica, Arial, sans-serif; color: #636363; background:transparent; }
+      .mini-basic{
+        position: absolute;
+        top: 0;
+        left: 0;
+        background:#f5f5f5;
+        border:1px solid #000;
+        height:50px;
+        width:50px;
+        border-radius:6px;
+        text-align:center;
+        line-height:50px;
+        z-index:1000000;
+        cursor:pointer;
+        display:none;
+      }
+      .mini-basic.show { display:block; }
+      .n_panel { width:100%; height:100%; background:#fff; border-radius:10px; position:relative; }
+      .n_header { text-align:center; height:40px; background:#f7f7f7; color:#000; font-size:18px; line-height:40px; border-radius:10px 10px 0 0; border-bottom:2px solid #eee; cursor:move; position:relative;}
+      .tools{position:absolute;right:0;top:0;}
+      .tools ul{margin:0;padding:0;}
+      .tools ul li{position:relative;display:inline-block;padding:0 5px;cursor:pointer;}
+      .tools ul li.minimality::after{
+        content:'最小化';
+        display:none;
+        position:absolute;
+        left:0;
+        bottom:-30px;
+        height:32px;
+        width:50px;
+        font-size:12px;
+        background:#ffffe1;
+        color:#000;
+        border-radius:3px;
+      }
+      .tools ul li.minimality:hover::after{display:block;}
+      .tools ul li.question::after{
+        content:'有问题';
+        display:none;
+        position:absolute;
+        left:0;
+        bottom:-30px;
+        height:32px;
+        width:50px;
+        font-size:12px;
+        background:#ffffe1;
+        color:#000;
+        border-radius:3px;
+      }
+      .tools ul li.question:hover::after{display:block;}
+      .n_body { font-weight:bold; font-size:13px; line-height:26px; height:160px; overflow-y:auto; }
+      .n_infoAlert { margin:0; padding:0; list-style:none; }
+      .n_footer { position:absolute; bottom:0; left:0; width:100%; background:#f7f7f7; color:#c5c5c5; font-size:13px; line-height:25px; border-radius:0 0 10px 10px; border-bottom:2px solid #eee; display:flex; justify-content:space-between; }
+      #n_button, #n_clear { border-radius:6px; border:0; background-color:blue; color:#fff; cursor:pointer; margin:0 5px; }
+      #n_button:hover { background-color:yellow; color:#000; }
+    </style>
+    <div class="mini-basic" id="mini-basic">放大</div>
+    <div class="n_panel" id="n_panel">
+      <div class="n_header" id="n_header">
+        雨课堂刷课助手
+        <div class='tools'>
+          <ul>
+            <li class='minimality' id="minimality">_</li>
+            <li class='question' id="question">?</li>
+          </ul>
+        </div>
+      </div>
+      <div class="n_body">
+        <ul class="n_infoAlert" id="n_infoAlert">
+          <li>⭐ 脚本支持：雨课堂所有版本，支持多倍速，自动播放</li>
+          <li>📢 使用方法：点击进入要刷的课程目录，点击开始刷课按钮即可自动运行</li>
+          <li>⚠️ 运行后请不要随意点击刷课窗口，可新开窗口，可最小化浏览器</li>
+          <li>💡 拖动上方标题栏可以进行拖拽哦!</li>
+          <li>⭐ 招募有时间和精力的大学生参与到本项目里，一起把项目做的更好。</li>
+          <hr>
+        </ul>
+      </div>
+      <div class="n_footer">
+        <p>雨课堂助手 ${basicConf.version}</p>
+        <button id="n_clear">清除进度缓存</button>
+        <button id="n_button">开始刷课</button>
+      </div>
     </div>
-  </div>
-  <div class="n_body">
-    <ul class="n_infoAlert">
-      <li>⭐ 脚本支持：雨课堂所有版本，支持多倍速，自动播放</li>
-      <li>📢 使用方法：点击进入要刷的课程目录，点击开始刷课按钮即可自动运行</li>
-      <li>⚠️ 运行后请不要随意点击刷课窗口，可新开窗口，可最小化浏览器</li>
-      <li>💡 拖动上方标题栏可以进行拖拽哦!</li>
-      <hr>
-    </ul>
-  </div>
-  <div class="n_footer">
-    <p>雨课堂助手 ${basicConf.version} </p>
-    <button id="n_clear">清除进度缓存</button>
-    <button id="n_button">开始刷课</button>
-  </div>
-  </div>
-  </div>
-  `;
-  // 插入div隐藏dom元素
-  const div = document.createElement('div');
-  document.body.append(div);
-  const shadowroot = div.attachShadow({ mode: 'closed' });
-  shadowroot.innerHTML = html;
-  console.log("已插入使用面板");
-  $.panel = shadowroot.lastElementChild.lastElementChild; // 保存panel节点
-  return $.panel;  // 返回panel根容器
+  `);
+  doc.close();
+
+  // 返回iframe内部需要用到的元素
+  return {
+    iframe,
+    doc,
+    panel: doc.getElementById('n_panel'),
+    header: doc.getElementById('n_header'),
+    button: doc.getElementById('n_button'),
+    clear: doc.getElementById('n_clear'),
+    infoAlert: doc.getElementById('n_infoAlert'),
+    minimality: doc.getElementById('minimality'),
+    question: doc.getElementById('question'),
+    miniBasic: doc.getElementById('mini-basic')
+  };
 }
 
-function addUserOperate() { // 2.添加交互操作
-  const panel = addWindow();
-  const header = panel.querySelector(".n_header");
-  const button = panel.querySelector("#n_button");
-  const clear = panel.querySelector("#n_clear");
-  const minimality = panel.querySelector(".minimality");
-  const question = panel.querySelector(".question");
-  const infoAlert = panel.querySelector(".n_infoAlert");
-  const miniWindow = panel.previousElementSibling;
-  let mouseMoveHander;
-  const mouseDownHandler = function (e) {   // 鼠标在header按下处理逻辑
-    e.preventDefault();
-    // console.log("鼠标按下/////header");
-    let innerLeft = e.offsetX,
-      innerTop = e.offsetY;
-    mouseMoveHander = function (e) {
-      // console.log("鼠标移动////body");
-      let left = e.clientX - innerLeft,
-        top = e.clientY - innerTop;
-      //获取body的页面可视宽高
-      var clientHeight = document.documentElement.clientHeight || document.body.clientHeight;
-      var clientWidth = document.documentElement.clientWidth || document.body.clientWidth;
-      // 通过判断是否溢出屏幕
-      if (left <= 0) {
-        left = 0;
-      } else if (left >= clientWidth - panel.offsetWidth) {
-        left = clientWidth - panel.offsetWidth
-      }
-      if (top <= 0) {
-        top = 0
-      } else if (top >= clientHeight - panel.offsetHeight) {
-        top = clientHeight - panel.offsetHeight
-      }
-      panel.setAttribute("style", `left:${left}px;top:${top}px`);
+function addUserOperate() {
+  const { iframe, doc, panel, header, button, clear, infoAlert, minimality, question, miniBasic } = addWindow();
+
+  // 拖拽功能
+  let isDragging = false, offsetX = 0, offsetY = 0;
+  header.addEventListener('mousedown', function (e) {
+    isDragging = true;
+    // 鼠标在iframe内的坐标 + iframe在主页面的位置
+    offsetX = e.clientX;
+    offsetY = e.clientY;
+    iframe.style.transition = 'none';
+    doc.body.style.userSelect = 'none';
+  });
+  doc.addEventListener('mousemove', function (e) {
+    if (isDragging) {
+      let dx = e.clientX - offsetX;
+      let dy = e.clientY - offsetY;
+      let left = parseInt(iframe.style.left) + dx;
+      let top = parseInt(iframe.style.top) + dy;
+      // 限制不出屏幕
+      left = Math.max(0, Math.min(window.parent.innerWidth - parseInt(iframe.style.width), left));
+      top = Math.max(0, Math.min(window.parent.innerHeight - parseInt(iframe.style.height), top));
+      iframe.style.left = left + 'px';
+      iframe.style.top = top + 'px';
+      offsetX = e.clientX;
+      offsetY = e.clientY;
     }
-    document.body.addEventListener("mousemove", mouseMoveHander);
-  }
-  header.addEventListener('mousedown', mouseDownHandler);
-  header.addEventListener('mouseup', function () {
-    // console.log("鼠标松起/////header");
-    document.body.removeEventListener("mousemove", mouseMoveHander);
-  })
-  document.body.addEventListener("mouseleave", function () {
-    // console.log("鼠标移出了body页面");
-    document.body.removeEventListener("mousemove", mouseMoveHander);
-  })
+  });
+  doc.addEventListener('mouseup', function () {
+    isDragging = false;
+    iframe.style.transition = '';
+    doc.body.style.userSelect = '';
+  });
+
+  // 最小化
+  minimality.addEventListener('click', function () {
+    panel.style.display = 'none';
+    miniBasic.classList.add('show');
+  });
+  // 放大
+  miniBasic.addEventListener('click', function () {
+    panel.style.display = '';
+    miniBasic.classList.remove('show');
+  });
+
+  // 有问题按钮
+  question.addEventListener('click', function () {
+    window.parent.alert('作者网站：niuwh.cn      作者博客：blog.niuwh.cn');
+  });
+
   // 刷课按钮
   button.onclick = function () {
-    start();
+    window.parent.start && window.parent.start();
     button.innerText = '刷课中~';
-  }
+  };
   // 清除数据按钮
   clear.onclick = function () {
-    $.userInfo.removeProgress(location.href);
-    localStorage.removeItem('pro_lms_classCount');
-  }
-  // 最小化按钮
-  function minimalityHander(e) {
-    if (miniWindow.className.includes("miniwin")) {
-      console.log("点击了缩小");
-      let leftPx = e.clientX - e.offsetX + 'px', topPx = e.clientY - e.offsetY + 'px';
-      panel.setAttribute("style", `z-index:-9999;`);
-      miniWindow.setAttribute("style", `z-index:9999;top:${topPx};left:${leftPx}`);
-    } else {
-      let leftPx = e.clientX - 450 + 'px', topPx = e.clientY - e.offsetY + 'px';
-      console.log("点击了放大");
-      panel.setAttribute("style", `z-index:9999;top:${topPx};left:${leftPx}`);
-      miniWindow.setAttribute("style", `z-index:-9999;`);
-    }
-    miniWindow.classList.toggle("miniwin");
-  }
-  minimality.addEventListener("click", minimalityHander);
-  miniWindow.addEventListener("click", minimalityHander);
-  // 有问题按钮
-  question.onclick = function () {
-    alert('作者网站：niuwh.cn' + '      ' + '作者博客：blog.niuwh.cn');
+    window.parent.$.userInfo.removeProgress(window.parent.location.href);
+    window.parent.localStorage.removeItem('pro_lms_classCount');
   };
+
   // 鼠标移入窗口，暂停自动滚动
   (function () {
     let scrollTimer;
     scrollTimer = setInterval(function () {
-      infoAlert.lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
+      if (infoAlert.lastElementChild) infoAlert.lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
     }, 500)
     infoAlert.addEventListener('mouseenter', () => {
       clearInterval(scrollTimer);
-      // console.log('鼠标进入了打印区');
     })
     infoAlert.addEventListener('mouseleave', () => {
       scrollTimer = setInterval(function () {
-        infoAlert.lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
+        if (infoAlert.lastElementChild) infoAlert.lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
       }, 500)
-      // console.log('鼠标离开了打印区');
     })
   })();
+
+  // 重定向 alertMessage 到 iframe
+  $.panel = panel;
+  $.alertMessage = function (message) {
+    const li = doc.createElement('li');
+    li.innerText = message;
+    infoAlert.appendChild(li);
+  };
 }
 
 function start() {  // 脚本入口函数
@@ -548,7 +413,8 @@ function start() {  // 脚本入口函数
     return false;
   }
 }
-
+window.$ = $;
+window.start = start;
 // yuketang.cn/v2/web页面的处理逻辑
 function yuketang_v2() {
   const baseUrl = location.href;    // 用于判断不同的课程
