@@ -852,9 +852,9 @@ function yuketang_pro_lms_new() {
 // 油猴执行文件
 (function () {
   'use strict';
-  // window.addEventListener('load', (event) => {    // 用于检测页面是否已经完全正常加载出来
-  //   console.log(('页面成功加载出来了'));
-  // })
+  // 防止在 iframe 内重复执行（Firefox 专用）
+  if (window.top !== window.self) return;
+
   const listenDom = setInterval(() => {
     if (document.body) {
       addUserOperate();
