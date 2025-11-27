@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.18
+// @version      2.5.1
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -31,7 +31,7 @@
 
 const _attachShadow = Element.prototype.attachShadow;
 const basicConf = {
-  version: '2.4.18',
+  version: '2.5.1',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
@@ -690,7 +690,7 @@ function yuketang_v2() {
       const course = list[count]?.querySelector('.content-box')?.querySelector('section');   // 保存当前课程dom结构
       let classInfo = course.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang'; // 2023.11.23 雨课堂更新，去掉了批量字样,所有如果不存在就默认为批量课程
       $.alertMessage('刷课状态：第' + (count + 1) + '个/' + list.length + '个');
-      // $.alertMessage('类型[' + classInfo + '] 第' + (count + 1) + '/' + list.length + '个');
+      $.alertMessage('类型[' + classInfo + '] 第' + (count + 1) + '/' + list.length + '个');
 
       if (count === list.length && play === true) {            // 结束
         $.alertMessage('课程刷完了');
@@ -1181,8 +1181,20 @@ function yuketang_v2() {
             main();
           })()
         }
-      } else if (!(classInfo.includes('shipin') || classInfo.includes('piliang') || classInfo.includes('kejian')) && play === true) { // 视频，批量，课件都不是的时候跳过，此处可以优化
-        $.alertMessage('第' + (count + 1) + '个：不是视频，已跳过');
+      } else if (classInfo?.includes('kaoshi') && play === true) { // 视频处理
+          play = false;
+          course.click(); // 进入课程
+          setTimeout(() => {
+            $.alertMessage('第' + (count + 1) + '个：进入了考试区');
+            $.alertMessage('考试区的脚本会被屏蔽，请之后手动完成考试，即将返回!!!');
+            count++;
+            $.userInfo.setProgress(baseUrl, count);
+            play = true;
+            history.back();
+            main();
+          }, 3000)
+      } else if (!(classInfo.includes('shipin') || classInfo.includes('piliang') || classInfo.includes('kejian') || classInfo.includes('kaoshi')) && play === true) { // 视频，批量，课件都不是的时候跳过，此处可以优化
+        $.alertMessage('第' + (count + 1) + '个：不是视频，批量，课件，考试区，已跳过');
         count++;
         $.userInfo.setProgress(baseUrl, count);
         main();
