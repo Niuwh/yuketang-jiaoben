@@ -690,7 +690,7 @@ function yuketang_v2() {
       const course = list[count]?.querySelector('.content-box')?.querySelector('section');   // 保存当前课程dom结构
       let classInfo = course.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang'; // 2023.11.23 雨课堂更新，去掉了批量字样,所有如果不存在就默认为批量课程
       $.alertMessage('刷课状态：第' + (count + 1) + '个/' + list.length + '个');
-      $.alertMessage('类型[' + classInfo + '] 第' + (count + 1) + '/' + list.length + '个');
+      // $.alertMessage('类型[' + classInfo + '] 第' + (count + 1) + '/' + list.length + '个');
 
       if (count === list.length && play === true) {            // 结束
         $.alertMessage('课程刷完了');
@@ -759,7 +759,7 @@ function yuketang_v2() {
                 console.log(classInfo1);
 
               }
-              $.alertMessage('批量中[' + classInfo1 + ']'); // 查找进入批量操作之后所有的类型
+              // $.alertMessage('批量中[' + classInfo1 + ']'); // 查找进入批量操作之后所有的类型
               if (classInfo1 == "音频" && play === true) {
                 play = false;
                 a[count1].click();
