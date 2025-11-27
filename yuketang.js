@@ -426,6 +426,7 @@ function addWindow() {
   iframe.style.border = '1px solid #a3a3a3';
   iframe.style.borderRadius = '10px';
   iframe.style.background = '#fff';
+  iframe.style.overflow = 'hidden'; // 避免缩小时出现滚动条
   iframe.style.boxShadow = '6px 4px 17px 2px #000000';
   iframe.setAttribute('frameborder', '0');
   iframe.setAttribute('id', 'ykt-helper-iframe');
@@ -437,9 +438,10 @@ function addWindow() {
   doc.open();
   doc.write(`
     <style>
+      html, body { overflow:hidden; }
       body { margin:0; font-family: Avenir, Helvetica, Arial, sans-serif; color: #636363; background:transparent; }
-      .mini-basic{ position: absolute; top: 0; left: 0; background:#f5f5f5; border:1px solid #000; height:50px; width:50px; border-radius:6px; text-align:center; line-height:50px; z-index:1000000; cursor:pointer; display:none; }
-      .mini-basic.show { display:block; }
+      .mini-basic{ position: absolute; inset:0; background:#3a7afe; color:#fff; height:100%; width:100%; min-height:42px; min-width:42px; border-radius:10px; text-align:center; line-height:1; z-index:1000000; cursor:pointer; display:none; align-items:center; justify-content:center; font-weight:bold; box-shadow:0 4px 12px rgba(0,0,0,0.18); }
+      .mini-basic.show { display:flex; }
       .n_panel { width:100%; height:100%; background:#fff; border-radius:10px; position:relative; overflow:hidden; }
       .n_header { text-align:center; height:40px; background:#f7f7f7; color:#000; font-size:18px; line-height:40px; border-radius:10px 10px 0 0; border-bottom:2px solid #eee; cursor:move; position:relative;}
       .tools{position:absolute;right:0;top:0;}
@@ -582,43 +584,73 @@ function addUserOperate() {
   // --- 原有的拖拽和功能逻辑保持不变 ---
 
   // 拖拽功能
-  let isDragging = false, offsetX = 0, offsetY = 0;
-  header.addEventListener('mousedown', function (e) {
-    isDragging = true;
-    offsetX = e.clientX;
-    offsetY = e.clientY;
-    iframe.style.transition = 'none';
-    doc.body.style.userSelect = 'none';
-  });
-  doc.addEventListener('mousemove', function (e) {
-    if (isDragging) {
-      let dx = e.clientX - offsetX;
-      let dy = e.clientY - offsetY;
-      let left = parseInt(iframe.style.left) + dx;
-      let top = parseInt(iframe.style.top) + dy;
-      left = Math.max(0, Math.min(window.parent.innerWidth - parseInt(iframe.style.width), left));
-      top = Math.max(0, Math.min(window.parent.innerHeight - parseInt(iframe.style.height), top));
-      iframe.style.left = left + 'px';
-      iframe.style.top = top + 'px';
-      offsetX = e.clientX;
-      offsetY = e.clientY;
-    }
-  });
-  doc.addEventListener('mouseup', function () {
+  let isDragging = false;
+  let startScreenX = 0, startScreenY = 0;
+  let startLeft = 0, startTop = 0;
+  const hostWindow = window.parent || window; // parent 捕获能拿到在 iframe 外的鼠标事件
+
+  const handleMove = function (e) {
+    if (!isDragging) return;
+    const deltaX = e.screenX - startScreenX;
+    const deltaY = e.screenY - startScreenY;
+    const maxLeft = Math.max(0, hostWindow.innerWidth - iframe.offsetWidth);
+    const maxTop = Math.max(0, hostWindow.innerHeight - iframe.offsetHeight);
+    iframe.style.left = Math.min(Math.max(0, startLeft + deltaX), maxLeft) + 'px';
+    iframe.style.top = Math.min(Math.max(0, startTop + deltaY), maxTop) + 'px';
+  };
+
+  const stopDrag = function () {
+    if (!isDragging) return;
     isDragging = false;
     iframe.style.transition = '';
     doc.body.style.userSelect = '';
+  };
+
+  header.addEventListener('mousedown', function (e) {
+    isDragging = true;
+    startScreenX = e.screenX;
+    startScreenY = e.screenY;
+    startLeft = parseFloat(iframe.style.left) || 0;
+    startTop = parseFloat(iframe.style.top) || 0;
+    iframe.style.transition = 'none';
+    doc.body.style.userSelect = 'none';
+    e.preventDefault();
   });
 
+  doc.addEventListener('mousemove', handleMove);
+  hostWindow.addEventListener('mousemove', handleMove);
+  doc.addEventListener('mouseup', stopDrag);
+  hostWindow.addEventListener('mouseup', stopDrag);
+  hostWindow.addEventListener('blur', stopDrag);
+
   // 最小化/放大
-  minimality.addEventListener('click', function () {
+  const normalSize = {
+    width: parseFloat(iframe.style.width) || 500,
+    height: parseFloat(iframe.style.height) || 300
+  };
+  const miniSize = 64;
+  let isMinimized = false;
+
+  const enterMini = function () {
+    if (isMinimized) return;
+    isMinimized = true;
     panel.style.display = 'none';
     miniBasic.classList.add('show');
-  });
-  miniBasic.addEventListener('click', function () {
+    iframe.style.width = miniSize + 'px';
+    iframe.style.height = miniSize + 'px';
+  };
+
+  const exitMini = function () {
+    if (!isMinimized) return;
+    isMinimized = false;
     panel.style.display = '';
     miniBasic.classList.remove('show');
-  });
+    iframe.style.width = normalSize.width + 'px';
+    iframe.style.height = normalSize.height + 'px';
+  };
+
+  minimality.addEventListener('click', enterMini);
+  miniBasic.addEventListener('click', exitMini);
 
   // 有问题按钮
   question.addEventListener('click', function () {
