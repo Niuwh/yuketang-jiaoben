@@ -1013,8 +1013,8 @@ function yuketang_v2() {
                     setTimeout(() => { bofang(); }, 1000);
 
                 })();
-              } else if (classInfo1 && !classInfo1.includes('shipin') && play === true) {
-                $.alertMessage('不是视频');
+              } else if (classInfo1 && !classInfo1.includes('shipin') && !classInfo1.includes('tuwen') && !classInfo1.includes('taolun') && !classInfo1.includes('zuoye') && play === true) {
+                $.alertMessage('不是视频、图文、讨论或作业，跳过');
                 count1++;
                 $.userInfo.setProgress(baseUrl, count, count1);
                 bofang();
