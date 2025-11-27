@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      2.4.17
+// @version      2.4.18
 // @description  针对雨课堂视频进行自动播放
 // @author       风之子
 // @license      GPL3
@@ -10,22 +10,31 @@
 // @run-at       document-start
 // @icon         http://yuketang.cn/favicon.ico
 // @grant        unsafeWindow
+// @grant        GM_xmlhttpRequest
+// @connect      api.openai.com
+// @connect      api.moonshot.cn
+// @connect      api.deepseek.com
+// @connect      dashscope.aliyuncs.com
+// @connect      cdn.jsdelivr.net
+// @connect      unpkg.com
+// @connect      ib.niuwh.cn
+// @require      https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js
+// @require      https://unpkg.com/tesseract.js@v2.1.0/dist/tesseract.min.js
 // ==/UserScript==
 // 雨课堂刷课脚本
 /*
   已适配雨课堂学校及网址：
-  学校：中原工学院，河南大学研究院，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院及其他院校...
+  学校：中原工学院，河南大学研究院，辽宁大学，河北大学，中南大学，电子科技大学，华北电力大学，上海理工大学研究生院，东南大学研究生院及其他院校...
   网址：changjiang.yuketang.cn，yuketang.cn ...
 */
 
 
 const _attachShadow = Element.prototype.attachShadow;
 const basicConf = {
-  version: '2.4.17',
+  version: '2.4.18',
   rate: 2, //用户可改 视频播放速率,可选值[1,1.25,1.5,2,3,16],默认为2倍速，实测4倍速往上有可能出现 bug，3倍速暂时未出现bug，推荐二倍/一倍。
   pptTime: 3000, // 用户可改 ppt播放时间，单位毫秒
 }
-
 const $ = { // 开发脚本的工具对象
   panel: "",      // panel节点，后期赋值
   observer: "",   // 保存observer观察对象
@@ -185,6 +194,223 @@ const $ = { // 开发脚本的工具对象
     log("window properties set!");
   }
 }
+
+// --- 核心 OCR 识别函数  ---
+async function recognizeTextFromElement(element) {
+    if (!element) return "无元素";
+
+    try {
+        $.alertMessage("正在截图...");
+        // 1. 将 DOM 转为 Canvas 图片
+        const canvas = await html2canvas(element, {
+            useCORS: true,
+            logging: false,
+            scale: 2,
+            backgroundColor: '#ffffff'
+        });
+
+        $.alertMessage("正在OCR识别(首次慢，请耐心等待)...");
+
+        // 2. 使用 Tesseract 进行识别
+        // 关键修改：去掉了被拦截的 langPath，使用默认配置
+        const { data: { text } } = await Tesseract.recognize(
+            canvas,
+            'chi_sim', // 简体中文
+            {
+                // 去掉被 CSP 拦截的 langPath
+                // 使用默认源，虽然慢一点，但不会报错
+                logger: m => {
+                    if (m.status === 'downloading tesseract lang') {
+                        // 可以在这里提示下载进度
+                        console.log(`正在下载语言包: ${(m.progress * 100).toFixed(0)}%`);
+                    }
+                }
+            }
+        );
+
+        // 3. 清理结果
+        return text.replace(/\s+/g, ' ').trim();
+    } catch (err) {
+        console.error("OCR 错误:", err);
+        // 如果是 Network Error，通常是因为网络慢，多试几次
+        $.alertMessage("OCR 失败: " + (err.message || "网络错误"));
+        return "OCR识别出错";
+    }
+}
+
+// --- 大模型 API 调用函数 (动态配置版) ---
+async function fetchAnswerFromAI(ocrText) {
+    // 1. 从 localStorage 获取配置
+    const savedConf = JSON.parse(localStorage.getItem('ykt_ai_conf') || '{}');
+
+    const API_URL = savedConf.url;
+    const API_KEY = savedConf.key;
+    const MODEL_NAME = savedConf.model;
+
+    return new Promise((resolve, reject) => {
+        // 安全检查
+        if (!API_KEY || API_KEY.includes("sk-xxxx")) {
+            const msg = "❌ 请点击[AI配置]按钮填入正确的API Key";
+            $.alertMessage(msg);
+            reject(msg);
+            return;
+        }
+
+        const prompt = `你是一个专业的做题助手。请先分析下面的 OCR 识别文本，判断题目类型，然后给出答案。
+
+        【输出规则】：
+        1. 识别到是【判断题】时：
+           - 如果是正确的，请输出：正确答案：对
+           - 如果是错误的，请输出：正确答案：错
+        2. 识别到是【单选题】或【多选题】时：
+           - 请直接输出选项字母，如：正确答案：A 或 正确答案：ABD
+        3. 格式必须包含“正确答案：”前缀。
+
+        【题目内容】：
+        ${ocrText}`;
+
+        GM_xmlhttpRequest({
+            method: "POST",
+            url: API_URL,
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${API_KEY}`
+            },
+            data: JSON.stringify({
+                model: MODEL_NAME,
+                messages: [
+                    { role: "system", content: "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。" },
+                    { role: "user", content: prompt }
+                ],
+                temperature: 0.1
+            }),
+            timeout: 10000,
+            onload: function(response) {
+                if (response.status === 200) {
+                    try {
+                        const resJson = JSON.parse(response.responseText);
+                        const answerText = resJson.choices[0].message.content;
+                        resolve(answerText);
+                    } catch (e) {
+                        reject("JSON解析失败");
+                    }
+                } else {
+                    const errMsg = `❌ 请求失败: HTTP ${response.status}`;
+                    $.alertMessage(errMsg);
+                    if (response.status === 401) $.alertMessage("原因: API Key 无效或余额不足");
+                    reject(errMsg);
+                }
+            },
+            onerror: function(err) {
+                reject("网络错误");
+            },
+            ontimeout: function() {
+                reject("请求超时");
+            }
+        });
+    });
+}
+
+// --- 答案解析与点击提交函数 (适配 Element UI 结构) ---
+async function autoSelectAndSubmit(aiResponse, itemBodyElement) {
+    // 1. 提取 AI 回复中的选项 (支持 "A", "ABD", "对", "错")
+    const match = aiResponse.match(/(?:正确)?答案[：:]?\s*([A-F]+(?:[,，][A-F]+)*|[对错]|正确|错误)/i);
+
+    if (!match) {
+        $.alertMessage("❌ 未提取到有效选项，请人工检查");
+        return;
+    }
+
+    let answerRaw = match[1].replace(/[,，]/g, '').trim();
+    let targetIndices = [];
+
+    // 2. 将答案转换为索引 [0, 1, 2...]
+    if (answerRaw === '对' || answerRaw === '正确') {
+        targetIndices = [0]; // A
+    } else if (answerRaw === '错' || answerRaw === '错误') {
+        targetIndices = [1]; // B
+    } else {
+        const map = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5 };
+        for (let char of answerRaw.toUpperCase()) {
+            if (map[char] !== undefined) targetIndices.push(map[char]);
+        }
+    }
+
+    if (targetIndices.length === 0) return;
+
+    $.alertMessage(`✅ AI建议选择: ${answerRaw}`);
+
+    // 3. 查找选项列表容器
+    let listContainer = itemBodyElement.querySelector('.list-inline.list-unstyled-radio') || // 判断题容器
+                        itemBodyElement.querySelector('.list-unstyled.list-unstyled-radio') || // 选择题容器
+                        itemBodyElement.querySelector('.list-unstyled') ||
+                        itemBodyElement.querySelector('ul.list');
+
+    if (!listContainer) {
+        $.alertMessage("❌ 未找到选项列表容器");
+        return;
+    }
+    // 获取所有选项 li
+    const options = listContainer.querySelectorAll('li');
+
+    // 4. 执行点击
+    for (let index of targetIndices) {
+        if (options[index]) {
+            // 【核心修改】精准定位点击目标
+            // 优先查找 Element UI 的 label 包装器 (el-radio 或 el-checkbox)
+            // 其次查找 文字标签 (el-radio__label)
+            // 最后查找 input 本身
+            const clickable = options[index].querySelector('label.el-radio') ||
+                              options[index].querySelector('label.el-checkbox') ||
+                              options[index].querySelector('.el-radio__label') ||
+                              options[index].querySelector('.el-checkbox__label') ||
+                              options[index].querySelector('input') ||
+                              options[index]; // 实在找不到就点 li 本身
+
+            if (clickable) {
+                clickable.click();
+                // 多选题防抖延迟
+                await new Promise(r => setTimeout(r, 300));
+            }
+        }
+    }
+
+    // 5. 点击提交按钮
+    await new Promise(r => setTimeout(r, 800));
+
+    // 使用你提供的 class 进行定位
+    // 结合 class 和 文字内容双重校验，防止点错
+    let submitBtn = null;
+
+    // 策略A：在当前题目区域内找
+    const localBtns = itemBodyElement.parentElement.querySelectorAll('.el-button--primary');
+    for (let btn of localBtns) {
+        if (btn.innerText.includes('提交')) {
+            submitBtn = btn;
+            break;
+        }
+    }
+
+    // 策略B：如果在局部没找到，在全局找 (使用完整类名)
+    if (!submitBtn) {
+        const allSubmitBtns = document.querySelectorAll('.el-button.el-button--primary.el-button--medium');
+        for (let btn of allSubmitBtns) {
+            // 必须包含“提交”二字，且可见
+            if (btn.innerText.includes('提交') && btn.offsetParent !== null) {
+                submitBtn = btn;
+                break;
+            }
+        }
+    }
+
+    if (submitBtn) {
+        $.alertMessage("正在提交...");
+        submitBtn.click();
+    } else {
+        $.alertMessage("⚠️ 未找到提交按钮,请手动提交。");
+    }
+}
+
 window.$ = $;
 window.start = start;
 
@@ -195,7 +421,7 @@ function addWindow() {
   iframe.style.top = '40px';
   iframe.style.left = '40px';
   iframe.style.width = '500px';
-  iframe.style.height = '250px';
+  iframe.style.height = '300px'; // 稍微加高一点以容纳设置面板
   iframe.style.zIndex = '999999';
   iframe.style.border = '1px solid #a3a3a3';
   iframe.style.borderRadius = '10px';
@@ -212,61 +438,33 @@ function addWindow() {
   doc.write(`
     <style>
       body { margin:0; font-family: Avenir, Helvetica, Arial, sans-serif; color: #636363; background:transparent; }
-      .mini-basic{
-        position: absolute;
-        top: 0;
-        left: 0;
-        background:#f5f5f5;
-        border:1px solid #000;
-        height:50px;
-        width:50px;
-        border-radius:6px;
-        text-align:center;
-        line-height:50px;
-        z-index:1000000;
-        cursor:pointer;
-        display:none;
-      }
+      .mini-basic{ position: absolute; top: 0; left: 0; background:#f5f5f5; border:1px solid #000; height:50px; width:50px; border-radius:6px; text-align:center; line-height:50px; z-index:1000000; cursor:pointer; display:none; }
       .mini-basic.show { display:block; }
-      .n_panel { width:100%; height:100%; background:#fff; border-radius:10px; position:relative; }
+      .n_panel { width:100%; height:100%; background:#fff; border-radius:10px; position:relative; overflow:hidden; }
       .n_header { text-align:center; height:40px; background:#f7f7f7; color:#000; font-size:18px; line-height:40px; border-radius:10px 10px 0 0; border-bottom:2px solid #eee; cursor:move; position:relative;}
       .tools{position:absolute;right:0;top:0;}
       .tools ul{margin:0;padding:0;}
       .tools ul li{position:relative;display:inline-block;padding:0 5px;cursor:pointer;}
-      .tools ul li.minimality::after{
-        content:'最小化';
-        display:none;
-        position:absolute;
-        left:0;
-        bottom:-30px;
-        height:32px;
-        width:50px;
-        font-size:12px;
-        background:#ffffe1;
-        color:#000;
-        border-radius:3px;
-      }
-      .tools ul li.minimality:hover::after{display:block;}
-      .tools ul li.question::after{
-        content:'有问题';
-        display:none;
-        position:absolute;
-        left:0;
-        bottom:-30px;
-        height:32px;
-        width:50px;
-        font-size:12px;
-        background:#ffffe1;
-        color:#000;
-        border-radius:3px;
-      }
-      .tools ul li.question:hover::after{display:block;}
-      .n_body { font-weight:bold; font-size:13px; line-height:26px; height:160px; overflow-y:auto; }
+      .n_body { font-weight:bold; font-size:13px; line-height:26px; height:calc(100% - 85px); overflow-y:auto; padding: 5px;}
       .n_infoAlert { margin:0; padding:0; list-style:none; }
-      .n_footer { position:absolute; bottom:0; left:0; width:100%; background:#f7f7f7; color:#c5c5c5; font-size:13px; line-height:25px; border-radius:0 0 10px 10px; border-bottom:2px solid #eee; display:flex; justify-content:space-between; }
-      #n_button, #n_clear { border-radius:6px; border:0; background-color:blue; color:#fff; cursor:pointer; margin:0 5px; }
+      .n_footer { position:absolute; bottom:0; left:0; width:100%; background:#f7f7f7; color:#c5c5c5; font-size:13px; line-height:25px; border-radius:0 0 10px 10px; border-bottom:2px solid #eee; display:flex; justify-content:center; align-items:center; padding: 5px 0;}
+
+      /* 按钮通用样式 */
+      button { border-radius:6px; border:0; color:#fff; cursor:pointer; margin:0 5px; padding: 5px 10px; font-size: 12px; }
+      #n_button { background-color:blue; }
       #n_button:hover { background-color:yellow; color:#000; }
+      #n_clear { background-color:#ff4d4f; }
+      #n_setting { background-color:#52c41a; }
+
+      /* 设置面板样式 */
+      #n_settings_panel { display:none; position:absolute; top:40px; left:0; width:100%; height:calc(100% - 40px); background:#fff; z-index:99; padding:15px; box-sizing:border-box; overflow-y:auto; }
+      .form-item { margin-bottom: 10px; }
+      .form-item label { display:block; margin-bottom: 3px; font-size: 12px; color: #333; }
+      .form-item input { width: 95%; padding: 5px; border: 1px solid #ddd; border-radius: 4px; }
+      .settings-footer { text-align: center; margin-top: 15px; }
+      .settings-footer button { padding: 6px 15px; }
     </style>
+
     <div class="mini-basic" id="mini-basic">放大</div>
     <div class="n_panel" id="n_panel">
       <div class="n_header" id="n_header">
@@ -278,26 +476,45 @@ function addWindow() {
           </ul>
         </div>
       </div>
+
       <div class="n_body">
         <ul class="n_infoAlert" id="n_infoAlert">
-          <li>⭐ 脚本支持：雨课堂所有版本，支持多倍速，自动播放</li>
-          <li>📢 使用方法：点击进入要刷的课程目录，点击开始刷课按钮即可自动运行</li>
-          <li>⚠️ 运行后请不要随意点击刷课窗口，可新开窗口，可最小化浏览器</li>
-          <li>💡 拖动上方标题栏可以进行拖拽哦!</li>
-          <li>⭐ 招募有时间和精力的大学生参与到本项目里，一起把项目做的更好。</li>
+          <li>⭐ 脚本支持：雨课堂所有版本</li>
+          <li>🤖 <strong>支持模型：</strong>DeepSeek、Kimi(Moonshot)、通义千问、OpenAI</li>
+          <li>📢 <strong>使用必读：</strong>自动答题需先点击<span style="color:green">[AI配置]</span>填入API Key</li>
+          <li>🚀 配置完成后，点击<span style="color:blue">[开始刷课]</span>即可启动视频与作业挂机</li>
           <hr>
         </ul>
       </div>
+
+      <div id="n_settings_panel">
+          <div class="form-item">
+            <label>API URL (接口地址):</label>
+            <input type="text" id="ai_url" placeholder="https://api.deepseek.com/chat/completions">
+          </div>
+          <div class="form-item">
+            <label>API KEY (密钥):</label>
+            <input type="password" id="ai_key" placeholder="sk-xxxxxxxx">
+          </div>
+          <div class="form-item">
+            <label>Model Name (模型名):</label>
+            <input type="text" id="ai_model" placeholder="deepseek-chat">
+          </div>
+          <div class="settings-footer">
+            <button id="save_settings" style="background:blue;">保存并关闭</button>
+            <button id="close_settings" style="background:#999;">取消</button>
+          </div>
+      </div>
+
       <div class="n_footer">
-        <p>雨课堂助手 ${basicConf.version}</p>
-        <button id="n_clear">清除进度缓存</button>
+        <button id="n_setting">AI配置</button>
+        <button id="n_clear">清除缓存</button>
         <button id="n_button">开始刷课</button>
       </div>
     </div>
   `);
   doc.close();
 
-  // 返回iframe内部需要用到的元素
   return {
     iframe,
     doc,
@@ -305,6 +522,13 @@ function addWindow() {
     header: doc.getElementById('n_header'),
     button: doc.getElementById('n_button'),
     clear: doc.getElementById('n_clear'),
+    settingBtn: doc.getElementById('n_setting'), // 新增
+    settingsPanel: doc.getElementById('n_settings_panel'), // 新增
+    saveSettingsBtn: doc.getElementById('save_settings'), // 新增
+    closeSettingsBtn: doc.getElementById('close_settings'), // 新增
+    aiUrlInput: doc.getElementById('ai_url'), // 新增
+    aiKeyInput: doc.getElementById('ai_key'), // 新增
+    aiModelInput: doc.getElementById('ai_model'), // 新增
     infoAlert: doc.getElementById('n_infoAlert'),
     minimality: doc.getElementById('minimality'),
     question: doc.getElementById('question'),
@@ -313,13 +537,54 @@ function addWindow() {
 }
 
 function addUserOperate() {
-  const { iframe, doc, panel, header, button, clear, infoAlert, minimality, question, miniBasic } = addWindow();
+  const { iframe, doc, panel, header, button, clear, settingBtn, settingsPanel, saveSettingsBtn, closeSettingsBtn, aiUrlInput, aiKeyInput, aiModelInput, infoAlert, minimality, question, miniBasic } = addWindow();
+
+  // 1. 初始化读取配置
+  const defaultConf = {
+    url: "https://api.deepseek.com/chat/completions",
+    key: "XXXxxxxxx",
+    model: "deepseek-chat"
+  };
+
+  // 从 localStorage 读取，如果没有则使用默认
+  function loadSettings() {
+    const saved = JSON.parse(window.parent.localStorage.getItem('ykt_ai_conf') || '{}');
+    aiUrlInput.value = saved.url || defaultConf.url;
+    aiKeyInput.value = saved.key || defaultConf.key;
+    aiModelInput.value = saved.model || defaultConf.model;
+  }
+  loadSettings();
+
+  // 2. 按钮事件绑定
+  // 打开设置面板
+  settingBtn.onclick = function() {
+    loadSettings(); // 每次打开重新读取最新
+    settingsPanel.style.display = 'block';
+  }
+
+  // 关闭设置面板
+  closeSettingsBtn.onclick = function() {
+    settingsPanel.style.display = 'none';
+  }
+
+  // 保存设置
+  saveSettingsBtn.onclick = function() {
+    const newConf = {
+      url: aiUrlInput.value.trim(),
+      key: aiKeyInput.value.trim(),
+      model: aiModelInput.value.trim()
+    };
+    window.parent.localStorage.setItem('ykt_ai_conf', JSON.stringify(newConf));
+    settingsPanel.style.display = 'none';
+    $.alertMessage("✅ AI配置已保存！");
+  }
+
+  // --- 原有的拖拽和功能逻辑保持不变 ---
 
   // 拖拽功能
   let isDragging = false, offsetX = 0, offsetY = 0;
   header.addEventListener('mousedown', function (e) {
     isDragging = true;
-    // 鼠标在iframe内的坐标 + iframe在主页面的位置
     offsetX = e.clientX;
     offsetY = e.clientY;
     iframe.style.transition = 'none';
@@ -331,7 +596,6 @@ function addUserOperate() {
       let dy = e.clientY - offsetY;
       let left = parseInt(iframe.style.left) + dx;
       let top = parseInt(iframe.style.top) + dy;
-      // 限制不出屏幕
       left = Math.max(0, Math.min(window.parent.innerWidth - parseInt(iframe.style.width), left));
       top = Math.max(0, Math.min(window.parent.innerHeight - parseInt(iframe.style.height), top));
       iframe.style.left = left + 'px';
@@ -346,12 +610,11 @@ function addUserOperate() {
     doc.body.style.userSelect = '';
   });
 
-  // 最小化
+  // 最小化/放大
   minimality.addEventListener('click', function () {
     panel.style.display = 'none';
     miniBasic.classList.add('show');
   });
-  // 放大
   miniBasic.addEventListener('click', function () {
     panel.style.display = '';
     miniBasic.classList.remove('show');
@@ -359,7 +622,7 @@ function addUserOperate() {
 
   // 有问题按钮
   question.addEventListener('click', function () {
-    window.parent.alert('作者网站：niuwh.cn      作者博客：blog.niuwh.cn');
+    window.parent.alert('作者网站：niuwh.cn');
   });
 
   // 刷课按钮
@@ -373,15 +636,13 @@ function addUserOperate() {
     window.parent.localStorage.removeItem('pro_lms_classCount');
   };
 
-  // 鼠标移入窗口，暂停自动滚动
+  // 自动滚动消息
   (function () {
     let scrollTimer;
     scrollTimer = setInterval(function () {
       if (infoAlert.lastElementChild) infoAlert.lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
     }, 500)
-    infoAlert.addEventListener('mouseenter', () => {
-      clearInterval(scrollTimer);
-    })
+    infoAlert.addEventListener('mouseenter', () => { clearInterval(scrollTimer); })
     infoAlert.addEventListener('mouseleave', () => {
       scrollTimer = setInterval(function () {
         if (infoAlert.lastElementChild) infoAlert.lastElementChild.scrollIntoView({ behavior: "smooth", block: "end", inline: "nearest" });
@@ -389,7 +650,7 @@ function addUserOperate() {
     })
   })();
 
-  // 重定向 alertMessage 到 iframe
+  // 重定向 alertMessage
   $.panel = panel;
   $.alertMessage = function (message) {
     const li = doc.createElement('li');
@@ -429,6 +690,8 @@ function yuketang_v2() {
       const course = list[count]?.querySelector('.content-box')?.querySelector('section');   // 保存当前课程dom结构
       let classInfo = course.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang'; // 2023.11.23 雨课堂更新，去掉了批量字样,所有如果不存在就默认为批量课程
       $.alertMessage('刷课状态：第' + (count + 1) + '个/' + list.length + '个');
+      // $.alertMessage('类型[' + classInfo + '] 第' + (count + 1) + '/' + list.length + '个');
+
       if (count === list.length && play === true) {            // 结束
         $.alertMessage('课程刷完了');
         $.panel.querySelector('#n_button').innerText = '刷完了~';
@@ -494,7 +757,9 @@ function yuketang_v2() {
                 classInfo1 = a[count1]?.querySelector('.tag').querySelector('use').getAttribute('xlink:href');
                 videotitle = a[count1].querySelector("h2").innerText;
                 console.log(classInfo1);
+
               }
+              $.alertMessage('批量中[' + classInfo1 + ']'); // 查找进入批量操作之后所有的类型
               if (classInfo1 == "音频" && play === true) {
                 play = false;
                 a[count1].click();
@@ -518,7 +783,7 @@ function yuketang_v2() {
                     }, 2000);
                   }
                 }, 3000)
-              } else if (classInfo1?.includes('shipin') && play === true) {
+              } else if (classInfo1?.includes('shipin') && play === true) { // #icon-shipin
                 play = false;
                 a[count1].click();
                 $.alertMessage(`开始播放:${videotitle}`);
@@ -544,8 +809,212 @@ function yuketang_v2() {
                     }, 2000);
                   }
                 }, 3000)
-              } else if (classInfo1 && !classInfo1.includes('shipin') && play === true) {
-                $.alertMessage('不是视频');
+              } else if ((classInfo1?.includes('tuwen') || classInfo1?.includes('taolun')) && play === true) { // #icon-tuwen
+                  play = false;
+                  a[count1].click(); // 进入详情页
+
+                  // 获取标题用于提示当前处理是图文或者讨论
+                  const typeText = classInfo1.includes('tuwen') ? '图文' : '讨论';
+                  const titleText = a[count1]?.querySelector('h2')?.innerText || '';
+                  $.alertMessage(`开始处理${typeText}: ${titleText}`);
+
+                  (async function () {
+                      // 1. 初始等待，并让页面向下滚动以触发加载
+                      $.alertMessage('页面加载中，正在等待评论区刷新...');
+                      window.scrollTo(0, document.body.scrollHeight); // 滚到底部触发加载
+                      await new Promise(r => setTimeout(r, 1000));
+                      window.scrollTo(0, 0); // 滚回顶部（可选，防止找不到元素）
+
+                      // 2. 定义评论区的选择器（修正后的）
+                      const commentCandidates = [
+                          '#new_discuss .new_discuss_list .cont_detail',
+                          '.new_discuss_list dd .cont_detail',
+                          '.cont_detail.word-break'
+                      ];
+                      // 3. 【关键修改】轮询检测评论，最多等待 15 秒
+                      let firstCommentText = '';
+                      let maxRetries = 30; // 30次 * 500ms = 15秒
+
+                      while (maxRetries > 0) {
+                          for (const sel of commentCandidates) {
+                              const list = document.querySelectorAll(sel);
+                              if (list && list.length > 0) {
+                                  for (const it of list) {
+                                      // 找到内容不为空的评论
+                                      if (it && it.innerText && it.innerText.trim().length > 0) {
+                                          firstCommentText = it.innerText.trim();
+                                          break;
+                                      }
+                                  }
+                              }
+                              if (firstCommentText) break;
+                          }
+
+                          if (firstCommentText) {
+                              break; // 找到了，跳出循环
+                          } else {
+                              // 没找到，等待 500ms 后重试
+                              maxRetries--;
+                              if (maxRetries % 4 === 0) $.alertMessage(`等待评论加载... 剩余重试 ${maxRetries} 次`); // 偶尔提示一下
+                              await new Promise(r => setTimeout(r, 500));
+                          }
+                      }
+
+                      // 4. 最终检查是否获取到评论
+                      if (!firstCommentText) {
+                          $.alertMessage(`超时未找到评论内容，跳过该条${typeText}`);
+                          count1++;
+                          $.userInfo.setProgress(baseUrl, count, count1);
+                          history.back();
+                          setTimeout(() => { bofang(); }, 1200);
+                          return;
+                      } else {
+                          $.alertMessage(`获取成功: ${firstCommentText.substring(0, 10)}...`);
+                      }
+
+                      // 5. 查找输入框
+                      const inputSelectors = [
+                          '.el-textarea__inner',
+                          'textarea.el-textarea__inner'
+                      ];
+                      let inputEl = null;
+                      // 同样稍微等待一下输入框（通常评论出来输入框也就出来了，简单查即可）
+                      for (const sel of inputSelectors) {
+                          const tmp = document.querySelector(sel);
+                          if (tmp) { inputEl = tmp; break; }
+                      }
+
+                      if (!inputEl) {
+                          $.alertMessage('未找到评论输入框，跳过');
+                          count1++;
+                          $.userInfo.setProgress(baseUrl, count, count1);
+                          history.back();
+                          setTimeout(() => { bofang(); }, 1200);
+                          return;
+                      }
+
+                      // 6. 填入内容并触发事件
+                      try {
+                          inputEl.value = firstCommentText;
+                          inputEl.dispatchEvent(new Event('input', { bubbles: true }));
+                          inputEl.dispatchEvent(new Event('change', { bubbles: true }));
+                          inputEl.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true })); // 模拟键盘事件激活按钮
+                      } catch (e) { console.warn(e); }
+
+                      // 等待按钮激活
+                      await new Promise(r => setTimeout(r, 800));
+
+                      // 7. 点击发送
+                      const sendCandidates = [
+                          '.el-button.submitComment',
+                          '.publish_discuss .postBtn button',
+                          '.el-button--primary'
+                      ];
+                      let sent = false;
+                      for (const s of sendCandidates) {
+                          const btn = document.querySelector(s);
+                          // 检查按钮是否存在，并且没有 'is-disabled' 类，且 disabled 属性为 false
+                          if (btn && !btn.disabled && !btn.classList.contains('is-disabled') && !btn.closest('.is-disabled')) {
+                              btn.click();
+                              sent = true;
+                              break;
+                          }
+                      }
+
+                      if(sent) {
+                          $.alertMessage(`已在${typeText}区发表评论`);
+                      } else {
+                          $.alertMessage('发送按钮仍不可用或未找到');
+                      }
+
+                      // 8. 等待发送完成并返回
+                      await new Promise(r => setTimeout(r, 1500));
+                      count1++;
+                      $.userInfo.setProgress(baseUrl, count, count1);
+                      history.back();
+                      setTimeout(() => { bofang(); }, 1000);
+
+                  })();
+              } else if (classInfo1?.includes('zuoye') && play === true) { // #icon-zuoye
+                play = false;
+                a[count1].click(); // 进入作业页面
+
+                (async function () {
+                    // 1. 等待页面基本加载
+                    $.alertMessage('等待作业加载...');
+                    let maxRetries = 40;
+                    while (maxRetries > 0) {
+                        if (document.querySelectorAll('.subject-item').length > 0) break;
+                        await new Promise(r => setTimeout(r, 500));
+                        maxRetries--;
+                    }
+                    // 2. 动态循环做题 (无限循环，直到找不到下一题)
+                    let i = 0;
+                    while (true) {
+                        // 【核心修改】每次都重新查询所有题目
+                        let items = document.querySelectorAll('.subject-item.J_order');
+
+                        // 如果当前索引超出了题目总数，说明做完了
+                        if (i >= items.length) {
+                            $.alertMessage(`✅ 已到达列表末尾 (共${items.length}题)，准备交卷`);
+                            break;
+                        }
+
+                        const listItem = items[i];
+
+                        // --- A. 点击切换题目 ---
+                        listItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        listItem.click();
+
+                        // --- B. 等待渲染 (OCR需要画面完全静止且加载完毕) ---
+                        await new Promise(r => setTimeout(r, 2000));
+                        // 检测是否已禁用提交按钮 (已提交状态)
+                        const disabledBtns = document.querySelectorAll('.el-button.el-button--info.is-disabled.is-plain');
+                        if (disabledBtns.length > 0) {
+                            $.alertMessage(`第 ${i + 1} 题已完成，跳过...`);
+                            i++; // 索引+1，继续下一题
+                            continue;
+                        }
+                        // --- C. OCR 与 AI ---
+                        let targetEl = document.querySelector('.item-body');
+                        const typeEl = document.querySelector('.item-type');
+                        if (typeEl && typeEl.parentElement) targetEl = typeEl.parentElement;
+
+                        if (targetEl) {
+                            $.alertMessage(`正在处理第 ${i + 1} 题...`);
+                            let ocrResult = await recognizeTextFromElement(targetEl);
+                            $.alertMessage(`第 ${i+1} 题识别: ${ocrResult.substring(0, 8)}...`);
+                            if (ocrResult && ocrResult.length > 5) {
+                                try {
+                                    $.alertMessage("🤖 正在请求AI获取答案...");
+                                    const aiResponse = await fetchAnswerFromAI(ocrResult);
+                                    await autoSelectAndSubmit(aiResponse, targetEl);
+                                } catch (err) {
+                                    $.alertMessage("AI 答题失败: " + err);
+                                    console.error(err);
+                                }
+                            }
+                        }
+
+                        // 缓冲
+                        await new Promise(r => setTimeout(r, 2000));
+
+                        // 准备处理下一题
+                        i++;
+                    }
+
+                    $.alertMessage('作业识别完毕，准备返回');
+                    await new Promise(r => setTimeout(r, 2000));
+
+                    // 返回逻辑
+                    count1++;
+                    $.userInfo.setProgress(baseUrl, count, count1);
+                    history.back();
+                    setTimeout(() => { bofang(); }, 1000);
+
+                })();
+              } else if (classInfo1 && !classInfo1.includes('shipin') && !classInfo1.includes('tuwen') && !classInfo1.includes('taolun') && !classInfo1.includes('zuoye') && play === true) {
+                $.alertMessage('不是视频、图文、讨论或作业，跳过');
                 count1++;
                 $.userInfo.setProgress(baseUrl, count, count1);
                 bofang();
