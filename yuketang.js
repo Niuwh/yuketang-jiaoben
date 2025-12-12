@@ -239,7 +239,7 @@ async function recognizeTextFromElement(element) {
 }
 
 // --- 大模型 API 调用函数 (动态配置版) ---
-async function fetchAnswerFromAI(ocrText) {
+async function fetchAnswerFromAI(ocrText, optionCount = 0) {
     // 1. 从 localStorage 获取配置
     const savedConf = JSON.parse(localStorage.getItem('ykt_ai_conf') || '{}');
 
@@ -255,8 +255,25 @@ async function fetchAnswerFromAI(ocrText) {
             reject(msg);
             return;
         }
+      // 构建允许的选项范围字符串 (例如: A-D)
+        const maxChar = String.fromCharCode(65 + optionCount - 1); // 65='A', 4->'D'
+        const rangeStr = `A-${maxChar}`;
 
         const prompt = `你是一个专业的做题助手。请先分析下面的 OCR 识别文本，判断题目类型，然后给出答案。
+
+        【强制纠错规则】：
+        1. 本题实际只有 ${optionCount} 个选项，标准编号范围是：${rangeStr}。
+        2. **忽略OCR识别出的选项字母错误**：OCR可能会把选项 "C" 误识别为 "D" 或其他乱码。
+        3. **按顺序强制映射**：请务必将OCR文本中的选项按出现顺序默认视为 A, B, C, D...
+           - 文本中的第 1 个选项就是 A
+           - 文本中的第 2 个选项就是 B
+           - 文本中的第 3 个选项就是 C (即使OCR显示它是 D 或 E，你也要输出 C)
+        4. 绝对不要输出超出 ${rangeStr} 范围的字母。
+
+        【重要约束】：
+        1. 本题共有 ${optionCount} 个选项（范围 ${rangeStr}）。
+        2. 绝对不要输出超出此范围的选项（例如不要输出 E、F）。
+        3. 如果 OCR 内容识别错误导致看起来像是有更多选项，请忽略，只从前 ${optionCount} 个中选。
 
         【输出规则】：
         1. 识别到是【判断题】时：
@@ -1014,12 +1031,26 @@ function yuketang_v2() {
 
                         if (targetEl) {
                             $.alertMessage(`正在处理第 ${i + 1} 题...`);
+                            let currentOptionCount = 0; // 默认值
+                            // 1. 尝试查找判断题容器 (特征: list-inline)
+                            // 2. 尝试查找选择题容器 (特征: list-unstyled)
+                            // 3. 保底查找通用列表 (ul.list)
+                            const listContainer = targetEl.querySelector('.list-inline.list-unstyled-radio') || 
+                                                  targetEl.querySelector('.list-unstyled.list-unstyled-radio') || 
+                                                  targetEl.querySelector('ul.list');
+                            if (listContainer) {
+                                // 计算 li 的数量
+                                const options = listContainer.querySelectorAll('li');
+                                if (options.length > 0) {
+                                    currentOptionCount = options.length;
+                                }
+                            }
                             let ocrResult = await recognizeTextFromElement(targetEl);
                             $.alertMessage(`第 ${i+1} 题识别: ${ocrResult.substring(0, 8)}...`);
                             if (ocrResult && ocrResult.length > 5) {
                                 try {
                                     $.alertMessage("🤖 正在请求AI获取答案...");
-                                    const aiResponse = await fetchAnswerFromAI(ocrResult);
+                                    const aiResponse = await fetchAnswerFromAI(ocrResult, currentOptionCount);
                                     await autoSelectAndSubmit(aiResponse, targetEl);
                                 } catch (err) {
                                     $.alertMessage("AI 答题失败: " + err);
