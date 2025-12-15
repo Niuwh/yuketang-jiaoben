@@ -621,7 +621,7 @@
     },
     applyMediaDefault(media) {
       if (!media) return;
-      media.play();
+      media.play().catch(e => console.log('自动播放失败，可能需要用户交互:', e));
       media.volume = 0;
       media.playbackRate = Config.playbackRate;
     },
@@ -632,7 +632,7 @@
       const observer = new MutationObserver(list => {
         for (const mutation of list) {
           if (mutation.type === 'childList' && target.innerText === '播放') {
-            video.play();
+            video.play().catch(e => console.log('恢复播放失败:', e));
           }
         }
       });
@@ -903,6 +903,10 @@ ${ocrText}
       if (isDeadline) this.panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
       Player.applySpeed();
       Player.mute();
+      const video = document.querySelector('video');
+      if (video) {
+        video.play().catch(e => console.log('视频播放失败:', e));
+      }
       const stopObserve = Player.observePause(document.querySelector('video'));
       await Utils.poll(() => isDeadline || Utils.isProgressDone(progressNode?.innerHTML), { interval: 5000, timeout: await Utils.getDDL() });
       stopObserve();
@@ -968,6 +972,10 @@ ${ocrText}
       await Utils.sleep(2500);
       Player.applySpeed();
       Player.mute();
+      const video = document.querySelector('video');
+      if (video) {
+        video.play().catch(e => console.log('视频播放失败:', e));
+      }
       const stopObserve = Player.observePause(document.querySelector('video'));
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       await Utils.poll(() => Utils.isProgressDone(progressNode?.innerHTML), { interval: 3000, timeout: await Utils.getDDL() });
@@ -1244,6 +1252,7 @@ ${ocrText}
                   Player.applySpeed();
                   Player.mute();
                   Player.observePause(video);
+                  video.play().catch(e => console.log('视频播放失败:', e));
                 }, 2000);
                 clearInterval(videoTimer);
                 videoTimer = null;
