@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.1
+// @version      3.0.2
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -28,7 +28,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.1',     // 版本号
+    version: '3.0.2',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -629,6 +629,14 @@
       if (!video) return () => { };
       const target = document.getElementsByClassName('play-btn-tip')[0];
       if (!target) return () => { };
+      // 自动播放
+      const playVideo = () => {
+        video.play().catch(e => {
+          console.warn('自动播放失败:', e);
+          setTimeout(playVideo, 3000);
+        });
+      };
+      playVideo();
       const observer = new MutationObserver(list => {
         for (const mutation of list) {
           if (mutation.type === 'childList' && target.innerText === '播放') {
