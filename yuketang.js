@@ -1044,16 +1044,22 @@ ${ocrText}
     }
 
     async autoCommentItem(item, typeText, idx) {
-      const featureFlags = Store.getFeatureConf();
-      if (!featureFlags.autoComment) {
-        this.panel.log('已关闭自动回复评论，跳过该项');
-        idx++;
-        this.updateProgress(this.outside, idx);
-        return idx;
-      }
       this.panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
       item.click();
       await Utils.sleep(1200);
+      
+      // 检查是否开启自动评论功能
+      const featureFlags = Store.getFeatureConf();
+      if (!featureFlags.autoComment) {
+        this.panel.log(`${typeText}已查看，但未开启自动回复功能`);
+        idx++;
+        this.updateProgress(this.outside, idx);
+        history.back();
+        await Utils.sleep(1000);
+        return idx;
+      }
+       
+      // 开启了自动评论功能，执行评论逻辑
       window.scrollTo(0, document.body.scrollHeight);
       await Utils.sleep(800);
       window.scrollTo(0, 0);
