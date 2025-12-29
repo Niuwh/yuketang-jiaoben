@@ -851,6 +851,32 @@ ${ocrText}
       Store.setProgress(this.baseUrl, outside, inside);
     }
 
+    checkCompletionStatus(statusBox, statusText) {
+      // 1. 检查明确的完成状态文本
+      if (statusText.includes('已完成') || statusText.includes('已读')) {
+        return true;
+      }
+
+      // 2. 检查明确的未完成状态文本
+      if (statusText.includes('未开始') || statusText.includes('未读') || statusText.includes('进行中')) {
+        return false;
+      }
+
+      // 3. 检查学习进度数字比例
+      const progressMatch = statusText.match(/(\d+)\/(\d+)/);
+      if (progressMatch) {
+        const [, current, total] = progressMatch;
+        const currentNum = parseInt(current, 10);
+        const totalNum = parseInt(total, 10);
+        
+        // 根据数字进度判断：相等且大于0表示已完成
+        return currentNum === totalNum && totalNum > 0;
+      }
+
+      // 默认返回false（未完成）
+      return false;
+    }
+
     async run() {
       this.panel.log(`检测到已播放到第 ${this.outside} 集，继续刷课...`);
       while (true) {
@@ -875,7 +901,22 @@ ${ocrText}
           continue;
         }
         const type = course.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang';
-        this.panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}`);
+        const title = course.querySelector('h2')?.innerText?.trim() || `第${this.outside + 1}项`;
+        
+        // 预检查完成状态
+        const statusBox = course.querySelector('.statistics-box .aside');
+        const statusText = statusBox?.innerText || '';
+        
+        // 判断是否已完成
+        let isCompleted = this.checkCompletionStatus(statusBox, statusText);
+        
+        if (isCompleted) {
+          this.panel.log(`✅ ${title} 已完成，跳过`);
+          this.updateProgress(this.outside + 1, 0);
+          continue;
+        }
+        
+        this.panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}，标题：${title}`);
         if (type.includes('shipin')) {
           await this.handleVideo(course);
         } else if (type.includes('piliang')) {
@@ -934,9 +975,23 @@ ${ocrText}
       while (idx < activities.length) {
         const item = activities[idx];
         if (!item) break;
+        
         const tagText = item.querySelector('.tag')?.innerText || '';
         const tagHref = item.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || '';
         const title = item.querySelector('h2')?.innerText || `第${idx + 1}项`;
+        
+        // 检查当前项目的完成状态
+        const statusBox = item.querySelector('.statistics-box .aside');
+        const statusText = statusBox?.innerText || '';
+        const isCompleted = this.checkCompletionStatus(statusBox, statusText);
+        
+        if (isCompleted) {
+          this.panel.log(`✅ ${title} 已完成，跳过`);
+          idx++;
+          this.updateProgress(this.outside, idx);
+          continue;
+        }
+        
         if (tagText === '音频') {
           idx = await this.playAudioItem(item, title, idx);
         } else if (tagHref.includes('shipin')) {
@@ -989,16 +1044,22 @@ ${ocrText}
     }
 
     async autoCommentItem(item, typeText, idx) {
-      const featureFlags = Store.getFeatureConf();
-      if (!featureFlags.autoComment) {
-        this.panel.log('已关闭自动回复评论，跳过该项');
-        idx++;
-        this.updateProgress(this.outside, idx);
-        return idx;
-      }
       this.panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
       item.click();
       await Utils.sleep(1200);
+      
+      // 检查是否开启自动评论功能
+      const featureFlags = Store.getFeatureConf();
+      if (!featureFlags.autoComment) {
+        this.panel.log(`${typeText}已查看，但未开启自动回复功能`);
+        idx++;
+        this.updateProgress(this.outside, idx);
+        history.back();
+        await Utils.sleep(1000);
+        return idx;
+      }
+       
+      // 开启了自动评论功能，执行评论逻辑
       window.scrollTo(0, document.body.scrollHeight);
       await Utils.sleep(800);
       window.scrollTo(0, 0);
@@ -1135,6 +1196,14 @@ ${ocrText}
       }
       course.click();
       await Utils.sleep(3000);
+      
+      // 检测"查看课件"按钮（课件概况页专用）
+      const checkBtn = document.querySelector('.ppt_img_box .check') || document.querySelector('p.check');
+      if (checkBtn && checkBtn.innerText?.trim() === '查看课件') {
+        this.panel.log('检测到"查看课件"按钮，正在点击...');
+        checkBtn.click();
+        await Utils.sleep(2000);
+      }
       const classType = document.querySelector('.el-card__header')?.innerText || '';
       const className = document.querySelector('.dialog-header')?.firstElementChild?.innerText || '课件';
       if (classType.includes('PPT')) {
