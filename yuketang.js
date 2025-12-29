@@ -1135,6 +1135,14 @@ ${ocrText}
       }
       course.click();
       await Utils.sleep(3000);
+      
+      // 检测"查看课件"按钮（课件概况页专用）
+      const checkBtn = document.querySelector('.ppt_img_box .check') || document.querySelector('p.check');
+      if (checkBtn && checkBtn.innerText?.trim() === '查看课件') {
+        this.panel.log('检测到"查看课件"按钮，正在点击...');
+        checkBtn.click();
+        await Utils.sleep(2000);
+      }
       const classType = document.querySelector('.el-card__header')?.innerText || '';
       const className = document.querySelector('.dialog-header')?.firstElementChild?.innerText || '课件';
       if (classType.includes('PPT')) {
