@@ -938,7 +938,7 @@ ${ocrText}
         const tagHref = item.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || '';
         const title = item.querySelector('h2')?.innerText || `第${idx + 1}项`;
         // 跳过已完成条目
-        const status = item.querySelector(".statistics-box")?.querySelector(".aside")?.querySelector(':scope span')?.innerText || '';
+        const status = item.querySelector('.statistics-box')?.querySelector('.aside')?.querySelector(':scope span')?.innerText || '';
         if (status === '已读' || status === '已完成' || status === '已发言') {
           this.panel.log(`${title} 已完成，跳过`);
           idx++;
