@@ -28,7 +28,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.2',     // 版本号
+    version: '3.0.3',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -38,6 +38,40 @@
       feature: 'ykt_feature_conf' // 是否开启AI作答/自动评论
     }
   };
+
+  const AI_PROVIDERS = {
+    deepseek: {
+      label: 'DeepSeek',
+      url: 'https://api.deepseek.com/chat/completions',
+      model: 'deepseek-chat'
+    },
+    openai: {
+      label: 'OpenAI',
+      url: 'https://api.openai.com/v1/chat/completions',
+      model: 'gpt-4o-mini'
+    },
+    moonshot: {
+      label: 'Kimi(Moonshot)',
+      url: 'https://api.moonshot.cn/v1/chat/completions',
+      model: 'moonshot-v1-8k'
+    },
+    dashscope: {
+      label: '通义千问(DashScope)',
+      url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
+      model: 'qwen-turbo'
+    }
+  };
+
+  function getProviderKeyByConf(url, model) {
+    const targetUrl = (url || '').trim();
+    const targetModel = (model || '').trim();
+    for (const [key, provider] of Object.entries(AI_PROVIDERS)) {
+      if (provider.url === targetUrl && provider.model === targetModel) {
+        return key;
+      }
+    }
+    return '';
+  }
 
   const Utils = {
     // 短暂睡眠，等待网页加载
@@ -126,9 +160,9 @@
       const raw = localStorage.getItem(Config.storageKeys.ai);
       const saved = Utils.safeJSONParse(raw, {}) || {};
       const conf = {
-        url: saved.url ?? "https://api.deepseek.com/chat/completions",
+        url: saved.url ?? AI_PROVIDERS.deepseek.url,
         key: saved.key ?? "sk-xxxxxxx",
-        model: saved.model ?? "deepseek-chat",
+        model: saved.model ?? AI_PROVIDERS.deepseek.model,
       };
       localStorage.setItem(Config.storageKeys.ai, JSON.stringify(conf));
       return conf;
@@ -297,7 +331,8 @@
                 color: #333;
               }
               .form-item input[type="text"],
-              .form-item input[type="password"] {
+              .form-item input[type="password"],
+              .form-item select {
                 width: 100%;
                 padding: 8px;
                 border: 1px solid #ddd;
@@ -408,6 +443,16 @@
               </div>
               <div id="settings">
                 <div class="form-item">
+                  <label>AI 提供商:</label>
+                  <select id="ai_provider">
+                    <option value="">手动配置</option>
+                    <option value="deepseek">DeepSeek</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="moonshot">Kimi(Moonshot)</option>
+                    <option value="dashscope">通义千问(DashScope)</option>
+                  </select>
+                </div>
+                <div class="form-item">
                   <label>API URL:</label>
                   <input type="text" id="ai_url" placeholder="https://api.deepseek.com/chat/completions">
                 </div>
@@ -457,6 +502,7 @@
       settings: doc.getElementById('settings'),
       saveSettings: doc.getElementById('save_settings'),
       closeSettings: doc.getElementById('close_settings'),
+      aiProviderSelect: doc.getElementById('ai_provider'),
       aiUrlInput: doc.getElementById('ai_url'),
       aiKeyInput: doc.getElementById('ai_key'),
       aiModelInput: doc.getElementById('ai_model'),
@@ -534,12 +580,13 @@
       if (ui.info.lastElementChild) ui.info.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end', inline: 'nearest' });
     };
 
-    const defaultAI = { url: 'https://api.deepseek.com/chat/completions', key: 'sk-xxxxxxx', model: 'deepseek-chat' };
+    const defaultAI = { url: AI_PROVIDERS.deepseek.url, key: 'sk-xxxxxxx', model: AI_PROVIDERS.deepseek.model };
     const loadAIConf = () => {
       const saved = Store.getAIConf();
       ui.aiUrlInput.value = saved.url || defaultAI.url;
       ui.aiKeyInput.value = saved.key || defaultAI.key;
       ui.aiModelInput.value = saved.model || defaultAI.model;
+      ui.aiProviderSelect.value = getProviderKeyByConf(saved.url, saved.model);
     };
     const loadFeatureConf = () => {
       const saved = Store.getFeatureConf();
@@ -571,6 +618,13 @@
       ui.settings.style.display = 'none';
       log('✅ AI 配置已保存');
     };
+    ui.aiProviderSelect.addEventListener('change', e => {
+      const providerKey = e.target.value;
+      if (!providerKey || !AI_PROVIDERS[providerKey]) return;
+      const provider = AI_PROVIDERS[providerKey];
+      ui.aiUrlInput.value = provider.url;
+      ui.aiModelInput.value = provider.model;
+    });
 
     ui.btnClear.onclick = () => {
       Store.removeProgress(window.parent.location.href);
