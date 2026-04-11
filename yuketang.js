@@ -48,17 +48,17 @@
     openai: {
       label: 'OpenAI',
       url: 'https://api.openai.com/v1/chat/completions',
-      model: 'gpt-4o-mini'
+      model: 'gpt-chat'
     },
     moonshot: {
       label: 'Kimi(Moonshot)',
       url: 'https://api.moonshot.cn/v1/chat/completions',
-      model: 'moonshot-v1-8k'
+      model: 'moonshot-chat'
     },
     dashscope: {
       label: '通义千问(DashScope)',
       url: 'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
-      model: 'qwen-turbo'
+      model: 'qwen-chat'
     }
   };
 
