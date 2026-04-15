@@ -1956,7 +1956,7 @@ ${ocrText}
       for (let retryCount = 0; retryCount < maxRetry; retryCount++) {
         try {
           if (retryCount > 0) this.panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
-          panel.log('🤖 请求 AI 获取答案...');
+          this.panel.log('🤖 请求 AI 获取答案...');
           const aiText = await Solver.askAI(ocrResult, optionCount);
           await Solver.autoSelectAndSubmit(aiText, questionRoot);
           await Utils.sleep(1200);
