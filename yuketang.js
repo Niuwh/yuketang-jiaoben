@@ -37,7 +37,8 @@
       progress: '[雨课堂脚本]刷课进度信息',
       ai: 'ykt_ai_conf',
       proClassCount: 'pro_lms_classCount',
-      feature: 'ykt_feature_conf' // 是否开启AI作答/自动评论
+      feature: 'ykt_feature_conf', // 是否开启AI作答/自动评论
+      pendingAutoStart: 'ykt_pending_auto_start'
     }
   };
 
@@ -82,6 +83,45 @@
     scrollToBottom(containerSelector) {
       const el = document.querySelector(containerSelector);
       if (el) el.scrollTop = el.scrollHeight;
+    },
+    getCurrentClassroomId() {
+      const query = new URLSearchParams(location.search);
+      const queryId = query.get('classroom_id');
+      if (queryId) return queryId;
+
+      const path = location.pathname;
+      return path.match(/^\/ai-workspace\/lms-graph\/([^/]+)/)?.[1]
+        || path.match(/^\/v2\/web\/studentLog\/([^/]+)/)?.[1]
+        || '';
+    },
+    isSupportedLearningPage() {
+      const path = location.pathname;
+      return path.includes('/ai-workspace/lms-graph/')
+        || path.includes('/v2/web/')
+        || path.includes('/pro/lms/');
+    },
+    waitForMountTarget(timeout = 15000) {
+      const getTarget = () => document.body || document.documentElement;
+      const existing = getTarget();
+      if (existing) return Promise.resolve(existing);
+
+      return new Promise(resolve => {
+        let done = false;
+        const finish = () => {
+          if (done) return;
+          done = true;
+          observer.disconnect();
+          clearTimeout(timer);
+          resolve(getTarget());
+        };
+        const observer = new MutationObserver(() => {
+          if (getTarget()) finish();
+        });
+        observer.observe(document, { childList: true, subtree: true });
+        document.addEventListener('DOMContentLoaded', finish, { once: true });
+        window.addEventListener('load', finish, { once: true });
+        const timer = setTimeout(finish, timeout);
+      });
     },
     async getDDL() {
       const element = document.querySelector('video') || document.querySelector('audio');
@@ -159,6 +199,28 @@
     },
     setFeatureConf(conf) {
       localStorage.setItem(Config.storageKeys.feature, JSON.stringify(conf));
+    },
+    getPendingAutoStart() {
+      const raw = localStorage.getItem(Config.storageKeys.pendingAutoStart);
+      const saved = Utils.safeJSONParse(raw, null);
+      if (!saved || !saved.classroomId || !saved.ts) return null;
+      if (Date.now() - saved.ts > 30 * 60 * 1000) {
+        localStorage.removeItem(Config.storageKeys.pendingAutoStart);
+        return null;
+      }
+      return saved;
+    },
+    setPendingAutoStart(classroomId = '', returnUrl = '') {
+      if (!classroomId) return;
+      const prev = this.getPendingAutoStart() || {};
+      localStorage.setItem(Config.storageKeys.pendingAutoStart, JSON.stringify({
+        classroomId,
+        returnUrl: returnUrl || prev.returnUrl || '',
+        ts: Date.now()
+      }));
+    },
+    clearPendingAutoStart() {
+      localStorage.removeItem(Config.storageKeys.pendingAutoStart);
     }
   };
 
@@ -179,7 +241,11 @@
     iframe.setAttribute('frameborder', '0');
     iframe.setAttribute('id', 'ykt-helper-iframe');
     iframe.setAttribute('allowtransparency', 'true');
-    document.body.appendChild(iframe);
+    const mountTarget = document.body || document.documentElement;
+    if (!mountTarget) {
+      throw new Error('面板挂载点不存在');
+    }
+    mountTarget.appendChild(iframe);
 
     const doc = iframe.contentDocument || iframe.contentWindow.document;
     doc.open();
@@ -599,7 +665,15 @@
     ui.btnClear.onclick = () => {
       Store.removeProgress(window.parent.location.href);
       localStorage.removeItem(Config.storageKeys.proClassCount);
+      Store.clearPendingAutoStart();
       log('已清除当前课程的刷课进度缓存');
+    };
+
+    let startHandler = null;
+    const invokeStart = () => {
+      log('启动中...');
+      ui.btnStart.innerText = '刷课中...';
+      startHandler && startHandler();
     };
 
     // 后面赋值给panel
@@ -607,11 +681,11 @@
       ...ui,
       log,
       setStartHandler(fn) {
-        ui.btnStart.onclick = () => {
-          log('启动中...');
-          ui.btnStart.innerText = '刷课中...';
-          fn && fn();
-        };
+        startHandler = fn;
+        ui.btnStart.onclick = invokeStart;
+      },
+      start() {
+        invokeStart();
       },
       resetStartButton(text = '开始刷课') {
         ui.btnStart.innerText = text;
@@ -621,6 +695,12 @@
 
   // ---- 播放器工具 ----
   const Player = {
+    isNearEnd(media, threshold = 1) {
+      if (!media) return false;
+      const duration = Number(media.duration || 0);
+      const currentTime = Number(media.currentTime || 0);
+      return Number.isFinite(duration) && duration > 1 && currentTime > 0 && duration - currentTime <= threshold;
+    },
     applySpeed() {
       const rate = Config.playbackRate;
       const speedBtn = document.querySelector('xt-speedlist xt-button') || document.getElementsByTagName('xt-speedlist')[0]?.firstElementChild?.firstElementChild;
@@ -649,13 +729,15 @@
       media.volume = 0;
       media.playbackRate = Config.playbackRate;
     },
-    observePause(video) {
+    observePause(video, shouldResume = () => true) {
       if (!video) return () => { };
       const target = document.getElementsByClassName('play-btn-tip')[0];
       if (!target) return () => { };
       // 自动播放
       const playVideo = () => {
+        if (!shouldResume() || video.ended || this.isNearEnd(video)) return;
         video.play().catch(e => {
+          if (!shouldResume() || video.ended || this.isNearEnd(video)) return;
           console.warn('自动播放失败:', e);
           setTimeout(playVideo, 3000);
         });
@@ -663,7 +745,13 @@
       playVideo();
       const observer = new MutationObserver(list => {
         for (const mutation of list) {
-          if (mutation.type === 'childList' && target.innerText === '播放') {
+          if (
+            mutation.type === 'childList'
+            && target.innerText === '播放'
+            && shouldResume()
+            && !video.ended
+            && !this.isNearEnd(video)
+          ) {
             video.play();
           }
         }
@@ -688,6 +776,199 @@
           }, timeout);
         }
       });
+    }
+  };
+
+  // ---- ai-workspace 路由工具 ----
+  const AiWorkspace = {
+    normalizeText(text) {
+      return String(text || '').replace(/\s+/g, ' ').trim();
+    },
+    isVisibleElement(element) {
+      if (!element || element.nodeType !== 1) return false;
+      const view = element.ownerDocument?.defaultView || window;
+      const style = view.getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== 'none'
+        && style.visibility !== 'hidden'
+        && rect.width > 0
+        && rect.height > 0;
+    },
+    getRoute() {
+      const match = location.pathname.match(/^\/ai-workspace\/lms-graph\/([^/]+)\/([^/]+)\/([^/?#]+)/);
+      if (!match) return null;
+      const [, classroomId, type, leafId] = match;
+      const query = new URLSearchParams(location.search);
+      return {
+        classroomId,
+        type,
+        leafId,
+        nodeId: query.get('node_id') || ''
+      };
+    },
+    getMediaCandidates() {
+      return [...document.querySelectorAll('video, audio')].filter(media => {
+        if (!(media instanceof HTMLMediaElement)) return false;
+        const rect = media.getBoundingClientRect();
+        const isVisible = rect.width > 0 && rect.height > 0;
+        return isVisible || media.tagName.toLowerCase() === 'audio';
+      });
+    },
+    getMedia() {
+      const candidates = this.getMediaCandidates();
+      if (!candidates.length) return document.querySelector('video') || document.querySelector('audio');
+      const score = media => {
+        const rect = media.getBoundingClientRect();
+        const area = rect.width * rect.height;
+        const playingBoost = !media.paused && !media.ended ? 1_000_000 : 0;
+        const currentBoost = Number(media.currentTime || 0);
+        return playingBoost + area + currentBoost;
+      };
+      return [...candidates].sort((a, b) => score(b) - score(a))[0];
+    },
+    isPlayerDone(media, { startTime = 0, minPlayedDelta = 0 } = {}) {
+      if (!media) return false;
+      const currentTime = Number(media?.currentTime || 0);
+      const duration = Number(media?.duration || 0);
+      const playedDelta = Math.max(0, currentTime - startTime);
+      if (playedDelta < minPlayedDelta) return false;
+      if (media?.ended) return true;
+      if (duration > 1 && currentTime > 0 && duration - currentTime <= 1) return true;
+      const display = document.querySelector('.xt_video_player_current_time_display')?.innerText?.trim() || '';
+      const [current, total] = display.split(' / ').map(text => text?.trim());
+      return Boolean(playedDelta >= minPlayedDelta && current && total && current === total);
+    },
+    keepAlive(shouldResume = () => true) {
+      let lastMedia = null;
+      const tick = () => {
+        if (!shouldResume()) return;
+        const media = this.getMedia();
+        if (!media) return;
+        if (lastMedia !== media) {
+          lastMedia = media;
+          media.addEventListener('pause', tick);
+        }
+        media.muted = true;
+        media.defaultMuted = true;
+        media.volume = 0;
+        media.playbackRate = Config.playbackRate;
+        if (media.paused && !media.ended && !Player.isNearEnd(media)) {
+          media.play().catch(() => { });
+        }
+      };
+      const timer = setInterval(tick, 500);
+      document.addEventListener('visibilitychange', tick);
+      window.addEventListener('focus', tick);
+      tick();
+      return () => {
+        clearInterval(timer);
+        if (lastMedia) lastMedia.removeEventListener('pause', tick);
+        document.removeEventListener('visibilitychange', tick);
+        window.removeEventListener('focus', tick);
+      };
+    },
+    getActiveLeafTitle() {
+      return document.querySelector('.leaf-item.is-active')?.innerText?.replace(/\s+/g, ' ').trim() || '';
+    },
+    getExerciseDocument() {
+      const localHasExercise = document.querySelector('#app .container-body .container-problem')
+        || document.querySelector('#app .container-problem')
+        || document.querySelector('.container-problem');
+      if (localHasExercise) return document;
+
+      const frames = [...document.querySelectorAll('iframe')];
+      for (const frame of frames) {
+        try {
+          const doc = frame.contentDocument;
+          if (!doc?.body) continue;
+          if (
+            doc.querySelector('.container-problem')
+            || doc.querySelector('.subject-item')
+            || doc.querySelector('.item-body')
+          ) {
+            return doc;
+          }
+        } catch (_) {
+          // ignore cross-document access failures
+        }
+      }
+      return null;
+    },
+    getExerciseContainer() {
+      const exerciseDoc = this.getExerciseDocument();
+      return exerciseDoc?.querySelector('#app .container-body .container-problem')
+        || exerciseDoc?.querySelector('#app .container-problem')
+        || exerciseDoc?.querySelector('.container-problem')
+        || null;
+    },
+    getExerciseQuestionTabs(root = this.getExerciseContainer()) {
+      if (!root) return [];
+      const selectors = [
+        '.subject-item.J_order',
+        '.subject-item',
+        '.problem-index-item',
+        '.question-index-item',
+        '[class*="subject-item"]',
+        '[class*="problem-index"]',
+        '[class*="question-index"]'
+      ].join(',');
+      const all = [...root.querySelectorAll(selectors)];
+      return all.filter((el, index, arr) => {
+        if (!this.isVisibleElement(el)) return false;
+        if (arr.indexOf(el) !== index) return false;
+        const text = this.normalizeText(el.innerText);
+        return text && text.length <= 20;
+      });
+    },
+    getExerciseQuestionBody(root = this.getExerciseContainer()) {
+      if (!root) return null;
+      const itemType = root.querySelector('.item-type');
+      if (itemType?.parentElement && this.isVisibleElement(itemType.parentElement)) return itemType.parentElement;
+      const selectors = [
+        '.item-body',
+        '.problem-content',
+        '.question-content',
+        '.problem-main',
+        '.problem-body',
+        '.question-body',
+        '[class*="problem-content"]',
+        '[class*="question-content"]',
+        '[class*="problem-body"]',
+        '[class*="question-body"]'
+      ];
+      for (const selector of selectors) {
+        const match = [...root.querySelectorAll(selector)].find(el => this.isVisibleElement(el));
+        if (match) return match;
+      }
+      return root;
+    },
+    isExerciseAnswered(root = this.getExerciseContainer()) {
+      if (!root) return false;
+      const disabled = root.querySelector('.el-button.el-button--info.is-disabled.is-plain')
+        || root.querySelector('button[disabled]');
+      if (disabled) return true;
+      const statusSelectors = [
+        '.result',
+        '.status',
+        '.answer-status',
+        '[class*="result"]',
+        '[class*="status"]'
+      ];
+      for (const selector of statusSelectors) {
+        const statusNode = [...root.querySelectorAll(selector)]
+          .find(el => this.isVisibleElement(el) && /已完成|已作答|已提交|回答正确|回答错误/.test(this.normalizeText(el.innerText)));
+        if (statusNode) return true;
+      }
+      return false;
+    },
+    getExerciseActionButton(root = this.getExerciseContainer(), pattern = /提交|保存|确认|确定|下一题|下一道|下一步|完成本题/) {
+      if (!root) return null;
+      const selectors = 'button, .el-button, [role="button"], [class*="button"]';
+      const nodes = [
+        ...root.querySelectorAll(selectors),
+        ...document.querySelectorAll(selectors)
+      ];
+      return nodes.find(el => this.isVisibleElement(el) && pattern.test(this.normalizeText(el.innerText)));
     }
   };
 
@@ -892,31 +1173,42 @@ ${ocrText}
       const listContainer = itemBodyElement.querySelector('.list-inline.list-unstyled-radio') ||
         itemBodyElement.querySelector('.list-unstyled.list-unstyled-radio') ||
         itemBodyElement.querySelector('.list-unstyled') ||
-        itemBodyElement.querySelector('ul.list');
+        itemBodyElement.querySelector('ul.list') ||
+        itemBodyElement.querySelector('[class*="option-list"]') ||
+        itemBodyElement.querySelector('[class*="answer-list"]') ||
+        itemBodyElement.querySelector('ul') ||
+        itemBodyElement.querySelector('[role="radiogroup"]');
       if (!listContainer) {
         panel.log('⚠️ 未找到选项容器');
         return;
       }
-      const options = listContainer.querySelectorAll('li');
+      const options = listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]');
       for (const idx of targetIndices) {
         if (!options[idx]) continue;
         const clickable = options[idx].querySelector('label.el-radio') ||
           options[idx].querySelector('label.el-checkbox') ||
           options[idx].querySelector('.el-radio__label') ||
           options[idx].querySelector('.el-checkbox__label') ||
+          options[idx].querySelector('[role="radio"]') ||
+          options[idx].querySelector('[role="checkbox"]') ||
           options[idx].querySelector('input') ||
           options[idx];
         clickable.click();
         await Utils.sleep(150);
       }
       const submitBtn = (() => {
-        const local = itemBodyElement.parentElement.querySelectorAll('.el-button--primary');
-        for (const btn of local) {
-          if (btn.innerText.includes('提交')) return btn;
+        const ownerDocument = itemBodyElement.ownerDocument || document;
+        const roots = [itemBodyElement.parentElement, itemBodyElement, ownerDocument].filter(Boolean);
+        const matchText = text => /提交|保存|确认|确定|提交答案/.test(text);
+        for (const root of roots) {
+          const local = root.querySelectorAll('button, .el-button, [role="button"]');
+          for (const btn of local) {
+            if (btn.offsetParent !== null && matchText(btn.innerText || '')) return btn;
+          }
         }
-        const global = document.querySelectorAll('.el-button.el-button--primary.el-button--medium');
+        const global = ownerDocument.querySelectorAll('.el-button.el-button--primary.el-button--medium');
         for (const btn of global) {
-          if (btn.innerText.includes('提交') && btn.offsetParent !== null) return btn;
+          if (matchText(btn.innerText || '') && btn.offsetParent !== null) return btn;
         }
         return null;
       })();
@@ -937,12 +1229,23 @@ ${ocrText}
       const { current } = Store.getProgress(this.baseUrl);
       this.outside = current.outside;
       this.inside = current.inside;
+      this.shouldStop = false;
     }
 
     updateProgress(outside, inside = 0) {
       this.outside = outside;
       this.inside = inside;
       Store.setProgress(this.baseUrl, outside, inside);
+    }
+
+    async waitForExternalHandoff(timeout = 1200) {
+      await Utils.sleep(timeout);
+      if (document.visibilityState === 'hidden' || !document.hasFocus()) {
+        this.shouldStop = true;
+        this.panel.log('已交给新页面继续，返回目录页后会自动续跑');
+        return true;
+      }
+      return false;
     }
 
     checkCompletionStatus(statusBox, statusText) {
@@ -986,6 +1289,7 @@ ${ocrText}
           this.panel.log('课程刷完啦 🎉');
           this.panel.resetStartButton('刷完啦~');
           Store.removeProgress(this.baseUrl);
+          Store.clearPendingAutoStart();
           break;
         }
         const course = list[this.outside]?.querySelector('.content-box')?.querySelector('section');
@@ -1026,6 +1330,7 @@ ${ocrText}
           this.panel.log('非视频/批量/课件/考试，已跳过');
           this.updateProgress(this.outside + 1, 0);
         }
+        if (this.shouldStop) return;
       }
     }
 
@@ -1039,6 +1344,7 @@ ${ocrText}
 
     async handleVideo(course) {
       course.click();
+      if (await this.waitForExternalHandoff(1500)) return;
       await Utils.sleep(3000);
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       const title = document.querySelector('.title')?.innerText || '视频';
@@ -1099,6 +1405,7 @@ ${ocrText}
           idx++;
           this.updateProgress(this.outside, idx);
         }
+        if (this.shouldStop) return;
       }
       this.updateProgress(this.outside + 1, 0);
       await Utils.sleep(1000);
@@ -1107,6 +1414,7 @@ ${ocrText}
     async playAudioItem(item, title, idx) {
       this.panel.log(`开始播放音频：${title}`);
       item.click();
+      if (await this.waitForExternalHandoff()) return idx;
       await Utils.sleep(2500);
       Player.applyMediaDefault(document.querySelector('audio'));
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
@@ -1122,6 +1430,7 @@ ${ocrText}
     async playVideoItem(item, title, idx) {
       this.panel.log(`开始播放视频：${title}`);
       item.click();
+      if (await this.waitForExternalHandoff()) return idx;
       await Utils.sleep(2500);
       Player.applySpeed();
       Player.mute();
@@ -1474,14 +1783,287 @@ ${ocrText}
         } else {
           localStorage.removeItem(Config.storageKeys.proClassCount);
           this.panel.log('课程播放完毕 🎉');
+          Store.clearPendingAutoStart();
           break;
         }
       }
     }
   }
 
+  // ---- ai-workspace 新版学习空间 ----
+  class AiWorkspaceRunner {
+    constructor(panel) {
+      this.panel = panel;
+    }
+
+    getExerciseQuestionLabel(root) {
+      const tabs = AiWorkspace.getExerciseQuestionTabs(root);
+      const active = tabs.find(tab => /active|current|selected|is-active/.test(tab.className));
+      return AiWorkspace.normalizeText(active?.innerText || '');
+    }
+
+    getReturnUrl() {
+      const pending = Store.getPendingAutoStart();
+      const route = AiWorkspace.getRoute();
+      if (!pending || !route) return '';
+      if (pending.classroomId !== route.classroomId) return '';
+      return pending.returnUrl || '';
+    }
+
+    getSourceWindow() {
+      try {
+        if (!window.opener || window.opener.closed) return null;
+        if (window.opener.location.origin !== location.origin) return null;
+        return window.opener;
+      } catch (_) {
+        return null;
+      }
+    }
+
+    async returnToSource() {
+      const returnUrl = this.getReturnUrl();
+      if (!returnUrl) return false;
+      this.panel.log('媒体播放完成，返回课程目录页继续匹配');
+      await Utils.sleep(1200);
+      const sourceWindow = this.getSourceWindow();
+      if (sourceWindow) {
+        try {
+          sourceWindow.location.href = returnUrl;
+          sourceWindow.focus();
+          window.close();
+          return true;
+        } catch (_) {
+          // ignore and fallback
+        }
+      }
+
+      if (location.href !== returnUrl) {
+        location.href = returnUrl;
+      } else {
+        history.back();
+      }
+      return true;
+    }
+
+    async handleMedia(route) {
+      const title = AiWorkspace.getActiveLeafTitle() || `${route.type} ${route.leafId}`;
+      this.panel.log(`开始播放：${title}`);
+      const ready = await Utils.poll(() => Boolean(AiWorkspace.getMedia()), { interval: 500, timeout: 20000 });
+      let media = AiWorkspace.getMedia();
+      if (!ready || !media) {
+        this.panel.log('未找到视频/音频元素，停止当前轮次');
+        return false;
+      }
+
+      const playbackState = { completed: false };
+      const shouldResume = () => !playbackState.completed;
+      let stopObserve = () => { };
+      if (media.tagName.toLowerCase() === 'video') {
+        Player.applySpeed();
+        Player.mute();
+        stopObserve = Player.observePause(media, shouldResume);
+      } else {
+        Player.applyMediaDefault(media);
+      }
+      const stopKeepAlive = AiWorkspace.keepAlive(shouldResume);
+      this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${Config.playbackRate}x，静音开启`);
+      try {
+        let startTime = Number(media.currentTime || 0);
+        const started = await Utils.poll(() => {
+          const currentMedia = AiWorkspace.getMedia();
+          if (currentMedia) media = currentMedia;
+          if (!media) return false;
+          const currentTime = Number(media.currentTime || 0);
+          return currentTime > startTime + 0.5 || (!media.paused && media.readyState >= 2 && currentTime > startTime + 0.2);
+        }, { interval: 500, timeout: 15000 });
+        if (!started) {
+          this.panel.log('未确认到视频实际开始播放，停止当前轮次');
+          return false;
+        }
+        startTime = Number(media.currentTime || 0);
+
+        let resolveEnded;
+        const endedPromise = new Promise(resolve => {
+          resolveEnded = resolve;
+        });
+        const onEnded = () => {
+          playbackState.completed = true;
+          resolveEnded(true);
+        };
+        media.addEventListener('ended', onEnded);
+        const done = await Promise.race([
+          endedPromise,
+          Utils.poll(() => {
+            if (playbackState.completed) return true;
+            const currentMedia = AiWorkspace.getMedia();
+            if (currentMedia) media = currentMedia;
+            if (AiWorkspace.isPlayerDone(media, { startTime, minPlayedDelta: 3 })) {
+              playbackState.completed = true;
+              return true;
+            }
+            return false;
+          }, { interval: 1000, timeout: await Utils.getDDL() })
+        ]);
+        media.removeEventListener('ended', onEnded);
+        playbackState.completed = true;
+        if (!done) {
+          this.panel.log('等待播放完成超时，停止当前轮次');
+          return false;
+        }
+      } finally {
+        stopObserve();
+        stopKeepAlive();
+      }
+
+      this.panel.log(`${title} 播放完成`);
+      return true;
+    }
+
+    async solveExerciseQuestion(root, label = '') {
+      const questionRoot = AiWorkspace.getExerciseQuestionBody(root);
+      if (!questionRoot) {
+        this.panel.log('未找到题目容器，停止当前轮次');
+        return false;
+      }
+      if (AiWorkspace.isExerciseAnswered(questionRoot)) {
+        this.panel.log(`${label || '当前题目'} 已完成，跳过`);
+        return true;
+      }
+
+      const listContainer = questionRoot.querySelector('.list-inline.list-unstyled-radio')
+        || questionRoot.querySelector('.list-unstyled.list-unstyled-radio')
+        || questionRoot.querySelector('.list-unstyled')
+        || questionRoot.querySelector('ul.list')
+        || questionRoot.querySelector('[class*="option-list"]')
+        || questionRoot.querySelector('[class*="answer-list"]')
+        || questionRoot.querySelector('ul')
+        || questionRoot.querySelector('[role="radiogroup"]');
+      const optionCount = listContainer
+        ? listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]').length
+        : 0;
+      if (!optionCount) {
+        this.panel.log(`${label || '当前题目'} 未找到选项，跳过`);
+        return false;
+      }
+
+      const ocrResult = await Solver.recognize(questionRoot);
+      if (!ocrResult || ocrResult.length <= 5) {
+        this.panel.log(`${label || '当前题目'} OCR 结果过短，跳过`);
+        return false;
+      }
+
+      const maxRetry = 3;
+      for (let retryCount = 0; retryCount < maxRetry; retryCount++) {
+        try {
+          if (retryCount > 0) this.panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
+          panel.log('🤖 请求 AI 获取答案...');
+          const aiText = await Solver.askAI(ocrResult, optionCount);
+          await Solver.autoSelectAndSubmit(aiText, questionRoot);
+          await Utils.sleep(1200);
+          return true;
+        } catch (err) {
+          this.panel.log(`AI 答题失败：${err}`);
+          if (retryCount < maxRetry - 1) await Utils.sleep(5000);
+        }
+      }
+      return false;
+    }
+
+    async advanceExerciseQuestion(root, previousFingerprint = '') {
+      const currentRoot = AiWorkspace.getExerciseContainer() || root;
+      const nextBtn = AiWorkspace.getExerciseActionButton(currentRoot, /下一题|下一道|下一步/);
+      if (!nextBtn) return false;
+      nextBtn.click();
+      return Utils.poll(() => {
+        const latestRoot = AiWorkspace.getExerciseContainer() || currentRoot;
+        const questionRoot = AiWorkspace.getExerciseQuestionBody(latestRoot);
+        const fingerprint = AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
+        return fingerprint && fingerprint !== previousFingerprint;
+      }, { interval: 500, timeout: 5000 });
+    }
+
+    async handleExercise(route) {
+      const featureFlags = Store.getFeatureConf();
+      if (!featureFlags.autoAI) {
+        this.panel.log('已关闭 AI 自动答题，作业将直接跳过');
+        return true;
+      }
+
+      const ready = await Utils.poll(() => Boolean(AiWorkspace.getExerciseContainer()), { interval: 500, timeout: 20000 });
+      const root = AiWorkspace.getExerciseContainer();
+      if (!ready || !root) {
+        this.panel.log('未找到作业容器，停止当前轮次');
+        return false;
+      }
+
+      this.panel.log(`开始处理作业：${AiWorkspace.getActiveLeafTitle() || route.leafId}`);
+      const tabs = AiWorkspace.getExerciseQuestionTabs(root);
+      if (tabs.length) {
+        this.panel.log(`检测到题目索引 ${tabs.length} 个，按题号顺序作答`);
+        for (let i = 0; i < tabs.length; i++) {
+          const currentRoot = AiWorkspace.getExerciseContainer() || root;
+          const currentTabs = AiWorkspace.getExerciseQuestionTabs(currentRoot);
+          const currentTab = currentTabs[i];
+          if (!currentTab) break;
+          currentTab.click();
+          await Utils.sleep(1200);
+          await this.solveExerciseQuestion(AiWorkspace.getExerciseContainer() || currentRoot, `第 ${i + 1} 题`);
+        }
+        return true;
+      }
+
+      this.panel.log('未找到题号列表，尝试只处理当前题并按下一题推进');
+      let previousFingerprint = '';
+      for (let i = 0; i < 20; i++) {
+        const currentRoot = AiWorkspace.getExerciseContainer() || root;
+        const questionRoot = AiWorkspace.getExerciseQuestionBody(currentRoot);
+        const fingerprint = AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
+        if (!fingerprint) break;
+        if (i > 0 && fingerprint === previousFingerprint) break;
+        await this.solveExerciseQuestion(currentRoot, this.getExerciseQuestionLabel(currentRoot) || `第 ${i + 1} 题`);
+        previousFingerprint = fingerprint;
+        const moved = await this.advanceExerciseQuestion(currentRoot, fingerprint);
+        if (!moved) break;
+      }
+      return true;
+    }
+
+    async run() {
+      preventScreenCheck();
+      const route = AiWorkspace.getRoute();
+      if (!route) {
+        this.panel.log('当前页面已离开 ai-workspace/lms-graph');
+        return;
+      }
+      if (!route.leafId) {
+        this.panel.log('未能识别当前知识点');
+        return;
+      }
+      let ok = false;
+      if (route.type === 'video' || route.type === 'audio') {
+        ok = await this.handleMedia(route);
+      } else if (route.type === 'exercise') {
+        ok = await this.handleExercise(route);
+      } else {
+        this.panel.log(`当前类型为 ${route.type}，最小方案暂不自动处理`);
+        return;
+      }
+      if (!ok) return;
+      await this.returnToSource();
+    }
+  }
+
   // ---- 路由 ----
   function start() {
+    const classroomId = Utils.getCurrentClassroomId();
+    const returnUrl = location.pathname.includes('/v2/web/studentLog/') ? location.href : '';
+    Store.setPendingAutoStart(classroomId, returnUrl);
+    const aiRoute = AiWorkspace.getRoute();
+    if (aiRoute) {
+      panel.log(`正在匹配处理逻辑：ai-workspace/lms-graph/${aiRoute.type}`);
+      new AiWorkspaceRunner(panel).run();
+      return;
+    }
     const url = location.host;
     const path = location.pathname.split('/');
     const matchURL = `${url}${path[0]}/${path[1]}/${path[2]}`;
@@ -1496,14 +2078,34 @@ ${ocrText}
       }
     } else {
       panel.resetStartButton('开始刷课');
-      panel.log('当前页面非刷课页面，应匹配 */v2/web/* 或 */pro/lms/*');
+      panel.log('当前页面非刷课页面，应匹配 */v2/web/*、*/pro/lms/* 或 */ai-workspace/lms-graph/*');
     }
   }
 
   // ---- 启动 ----
-  if (Utils.inIframe()) return;
-  panel = createPanel();
-  panel.log(`雨课堂刷课助手 v${Config.version} 已加载`);
-  panel.setStartHandler(start);
+  async function boot() {
+    if (Utils.inIframe()) return;
+    await Utils.waitForMountTarget();
+    try {
+      panel = createPanel();
+      panel.log(`雨课堂刷课助手 v${Config.version} 已加载`);
+      panel.setStartHandler(start);
+      const pendingAutoStart = Store.getPendingAutoStart();
+      const currentClassroomId = Utils.getCurrentClassroomId();
+      if (
+        pendingAutoStart
+        && Utils.isSupportedLearningPage()
+        && currentClassroomId
+        && pendingAutoStart.classroomId === currentClassroomId
+      ) {
+        panel.log(`检测到跨页面跳转，自动恢复刷课：课堂 ${currentClassroomId}`);
+        setTimeout(() => panel.start(), 1200);
+      }
+    } catch (err) {
+      console.error('面板初始化失败:', err);
+    }
+  }
+
+  boot();
 
 })();
