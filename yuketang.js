@@ -90,15 +90,25 @@
       if (queryId) return queryId;
 
       const path = location.pathname;
+      // 增强classroomId提取，覆盖更多可能的路径格式
       return path.match(/^\/ai-workspace\/lms-graph\/([^/]+)/)?.[1]
         || path.match(/^\/v2\/web\/studentLog\/([^/]+)/)?.[1]
+        || path.match(/^\/pro\/lms\/([^/]+)/)?.[1]
+        || path.match(/classroom_id=([^&]+)/)?.[1]
+        || query.get('cid')
         || '';
     },
     isSupportedLearningPage() {
       const path = location.pathname;
+      const url = location.href;
+      // 增强页面类型判断，覆盖更多可能的学习页面
       return path.includes('/ai-workspace/lms-graph/')
         || path.includes('/v2/web/')
-        || path.includes('/pro/lms/');
+        || path.includes('/pro/lms/')
+        || url.includes('classroom_id=')
+        || url.includes('/video/')
+        || url.includes('/exercise/')
+        || url.includes('/audio/');
     },
     waitForMountTarget(timeout = 15000) {
       const getTarget = () => document.body || document.documentElement;
@@ -1265,7 +1275,7 @@ ${ocrText}
         const [, current, total] = progressMatch;
         const currentNum = parseInt(current, 10);
         const totalNum = parseInt(total, 10);
-        
+
         // 根据数字进度判断：相等且大于0表示已完成
         return currentNum === totalNum && totalNum > 0;
       }
@@ -1300,20 +1310,20 @@ ${ocrText}
         }
         const type = course.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang';
         const title = course.querySelector('h2')?.innerText?.trim() || `第${this.outside + 1}项`;
-        
+
         // 预检查完成状态
         const statusBox = course.querySelector('.statistics-box .aside');
         const statusText = statusBox?.innerText || '';
-        
+
         // 判断是否已完成
         let isCompleted = this.checkCompletionStatus(statusBox, statusText);
-        
+
         if (isCompleted) {
           this.panel.log(`✅ ${title} 已完成，跳过`);
           this.updateProgress(this.outside + 1, 0);
           continue;
         }
-        
+
         this.panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}，标题：${title}`);
         if (type.includes('shipin')) {
           await this.handleVideo(course);
@@ -1375,23 +1385,23 @@ ${ocrText}
       while (idx < activities.length) {
         const item = activities[idx];
         if (!item) break;
-        
+
         const tagText = item.querySelector('.tag')?.innerText || '';
         const tagHref = item.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || '';
         const title = item.querySelector('h2')?.innerText || `第${idx + 1}项`;
-        
+
         // 检查当前项目的完成状态
         const statusBox = item.querySelector('.statistics-box .aside');
         const statusText = statusBox?.innerText || '';
         const isCompleted = this.checkCompletionStatus(statusBox, statusText);
-        
+
         if (isCompleted) {
           this.panel.log(`✅ ${title} 已完成，跳过`);
           idx++;
           this.updateProgress(this.outside, idx);
           continue;
         }
-        
+
         if (tagText === '音频') {
           idx = await this.playAudioItem(item, title, idx);
         } else if (tagHref.includes('shipin')) {
@@ -1450,7 +1460,7 @@ ${ocrText}
       this.panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
       item.click();
       await Utils.sleep(1200);
-      
+
       // 检查是否开启自动评论功能
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoComment) {
@@ -1461,7 +1471,7 @@ ${ocrText}
         await Utils.sleep(1000);
         return idx;
       }
-       
+
       // 开启了自动评论功能，执行评论逻辑
       window.scrollTo(0, document.body.scrollHeight);
       await Utils.sleep(800);
@@ -1615,7 +1625,7 @@ ${ocrText}
       }
       course.click();
       await Utils.sleep(3000);
-      
+
       // 检测"查看课件"按钮（课件概况页专用）
       const checkBtn = document.querySelector('.ppt_img_box .check') || document.querySelector('p.check');
       if (checkBtn && checkBtn.innerText?.trim() === '查看课件') {
@@ -2090,15 +2100,33 @@ ${ocrText}
       panel = createPanel();
       panel.log(`雨课堂刷课助手 v${Config.version} 已加载`);
       panel.setStartHandler(start);
+
+      // 改进的自动恢复逻辑
       const pendingAutoStart = Store.getPendingAutoStart();
       const currentClassroomId = Utils.getCurrentClassroomId();
-      if (
-        pendingAutoStart
-        && Utils.isSupportedLearningPage()
-        && currentClassroomId
-        && pendingAutoStart.classroomId === currentClassroomId
-      ) {
-        panel.log(`检测到跨页面跳转，自动恢复刷课：课堂 ${currentClassroomId}`);
+      const isSupportedPage = Utils.isSupportedLearningPage();
+
+      // 更灵活的自动恢复条件
+      let shouldAutoStart = false;
+      let autoStartReason = '';
+
+      if (pendingAutoStart) {
+        if (isSupportedPage && currentClassroomId && pendingAutoStart.classroomId === currentClassroomId) {
+          shouldAutoStart = true;
+          autoStartReason = `精确匹配课堂ID: ${currentClassroomId}`;
+        } else if (isSupportedPage && !currentClassroomId && pendingAutoStart.classroomId) {
+          // 如果当前页面无法提取classroomId，但确实是学习页面，且有pending状态，也尝试恢复
+          shouldAutoStart = true;
+          autoStartReason = `学习页面但无法提取课堂ID，使用pending状态`;
+        } else if (isSupportedPage && currentClassroomId && !pendingAutoStart.classroomId) {
+          // 如果pending状态中没有classroomId，但当前页面有，也尝试恢复
+          shouldAutoStart = true;
+          autoStartReason = `当前页面有课堂ID但pending状态缺失，尝试恢复`;
+        }
+      }
+
+      if (shouldAutoStart) {
+        panel.log(`检测到跨页面跳转，自动恢复刷课：${autoStartReason}`);
         setTimeout(() => panel.start(), 1200);
       }
     } catch (err) {
