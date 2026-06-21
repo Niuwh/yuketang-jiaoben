@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.3
+// @version      3.0.4
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,9 +30,9 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.2',     // 版本号
+    version: '3.0.4',     // 版本号
     playbackRate: 2,      // 视频播放倍速
-    pptInterval: 3000,    // ppt翻页间隔
+    pptInterval: 3000,    // ppt翻页间隔（毫秒）
     storageKeys: {        // 使用者勿动
       progress: '[雨课堂脚本]刷课进度信息',
       ai: 'ykt_ai_conf',
@@ -92,6 +92,7 @@
       const path = location.pathname;
       return path.match(/^\/ai-workspace\/lms-graph\/([^/]+)/)?.[1]
         || path.match(/^\/v2\/web\/studentLog\/([^/]+)/)?.[1]
+        || path.match(/^\/v2\/web\/cloud\/student\/[^/]+\/([^/]+)/)?.[1]
         || '';
     },
     isSupportedLearningPage() {
@@ -723,19 +724,87 @@
       const video = document.querySelector('video');
       if (video) video.volume = 0;
     },
+    findPlayButton() {
+      const selectors = [
+        '.play-btn-tip',
+        '.play-btn',
+        '.video-js .vjs-big-play-button',
+        '.xt-play-button',
+        '.xt-startbutton',
+        '.player-play',
+        '.player-start',
+        '[class*="play-button"]:not([class*="pause"])',
+        '[class*="play-btn"]'
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el && el.offsetParent !== null) return el;
+      }
+      return null;
+    },
+    clickBigPlayButton() {
+      const btn = this.findPlayButton();
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      const video = document.querySelector('video');
+      if (video) {
+        const rect = video.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+          const evt = new MouseEvent('click', {
+            bubbles: true,
+            cancelable: true,
+            clientX: rect.left + rect.width / 2,
+            clientY: rect.top + rect.height / 2
+          });
+          video.dispatchEvent(evt);
+          video.click();
+          return true;
+        }
+      }
+      return false;
+    },
     applyMediaDefault(media) {
       if (!media) return;
-      media.play();
+      this.clickBigPlayButton();
+      media.play().catch(() => { });
       media.volume = 0;
       media.playbackRate = Config.playbackRate;
+    },
+    async startPlayback(media, maxRetries = 5) {
+      if (!media) return false;
+      for (let i = 0; i < maxRetries; i++) {
+        this.clickBigPlayButton();
+        await Utils.sleep(300);
+        try {
+          await media.play();
+        } catch (e) {
+          console.warn('播放失败，重试:', e);
+          await Utils.sleep(1000);
+          continue;
+        }
+        await Utils.sleep(500);
+        if (!media.paused || media.ended) return true;
+      }
+      return false;
+    },
+    async playFromStart(media) {
+      if (!media) return;
+      try {
+        media.currentTime = 0;
+      } catch (e) {
+        console.warn('重置播放时间失败:', e);
+      }
+      await Utils.sleep(300);
     },
     observePause(video, shouldResume = () => true) {
       if (!video) return () => { };
       const target = document.getElementsByClassName('play-btn-tip')[0];
-      if (!target) return () => { };
       // 自动播放
       const playVideo = () => {
         if (!shouldResume() || video.ended || this.isNearEnd(video)) return;
+        this.clickBigPlayButton();
         video.play().catch(e => {
           if (!shouldResume() || video.ended || this.isNearEnd(video)) return;
           console.warn('自动播放失败:', e);
@@ -743,6 +812,7 @@
         });
       };
       playVideo();
+      if (!target) return () => { };
       const observer = new MutationObserver(list => {
         for (const mutation of list) {
           if (
@@ -752,6 +822,7 @@
             && !video.ended
             && !this.isNearEnd(video)
           ) {
+            this.clickBigPlayButton();
             video.play();
           }
         }
@@ -776,6 +847,81 @@
           }, timeout);
         }
       });
+    },
+    async waitForFullPlayback(media, progressNode, options = {}) {
+      if (!media) return false;
+      const { title = '视频', onLog } = options;
+      const maxReplayAttempts = 3;
+      let attempts = 0;
+
+      while (attempts < maxReplayAttempts) {
+        attempts++;
+        if (attempts > 1 && onLog) {
+          onLog(`${title} 进度未满，第 ${attempts} 次从头重播...`);
+        }
+
+        await this.playFromStart(media);
+        const started = await this.startPlayback(media);
+        if (!started) {
+          console.warn(`${title} 未能开始播放`);
+          await Utils.sleep(2000);
+          continue;
+        }
+
+        this.applySpeed();
+        this.mute();
+        const stopObserve = this.observePause(media);
+
+        let ended = false;
+        let lastTime = -1;
+        let stuckCount = 0;
+        const startWait = Date.now();
+        const duration = Number(media.duration || 0);
+        const maxWait = Math.max(duration * 4000, 120000);
+
+        while (!ended && Date.now() - startWait < maxWait) {
+          await Utils.sleep(1000);
+
+          if (Utils.isProgressDone(progressNode?.innerHTML)) {
+            ended = true;
+            break;
+          }
+
+          if (media.ended || this.isNearEnd(media)) {
+            await Utils.sleep(3000);
+            if (Utils.isProgressDone(progressNode?.innerHTML) || media.ended || this.isNearEnd(media)) {
+              ended = true;
+              break;
+            }
+          }
+
+          if (Math.abs(media.currentTime - lastTime) < 0.05 && !media.paused) {
+            stuckCount++;
+            if (stuckCount > 15) {
+              if (onLog) onLog(`${title} 播放卡住，尝试恢复`);
+              await this.startPlayback(media);
+              stuckCount = 0;
+            }
+          } else {
+            stuckCount = 0;
+            lastTime = media.currentTime;
+          }
+
+          if (media.paused && !media.ended && !this.isNearEnd(media)) {
+            await this.startPlayback(media);
+          }
+        }
+
+        stopObserve();
+
+        if (Utils.isProgressDone(progressNode?.innerHTML)) {
+          return true;
+        }
+
+        await Utils.sleep(1000);
+      }
+
+      return false;
     }
   };
 
@@ -795,16 +941,20 @@
         && rect.height > 0;
     },
     getRoute() {
+      // ai-workspace / lms-graph 路由
       const match = location.pathname.match(/^\/ai-workspace\/lms-graph\/([^/]+)\/([^/]+)\/([^/?#]+)/);
-      if (!match) return null;
-      const [, classroomId, type, leafId] = match;
-      const query = new URLSearchParams(location.search);
-      return {
-        classroomId,
-        type,
-        leafId,
-        nodeId: query.get('node_id') || ''
-      };
+      if (match) {
+        const [, classroomId, type, leafId] = match;
+        const query = new URLSearchParams(location.search);
+        return { classroomId, type, leafId, nodeId: query.get('node_id') || '' };
+      }
+      // v2/web/cloud 路由，例如 /v2/web/cloud/student/exercise/{classroomId}/{nodeId}/{leafId}
+      const cloudMatch = location.pathname.match(/^\/v2\/web\/cloud\/student\/([^/]+)\/([^/]+)\/([^/]+)\/([^/?#]+)/);
+      if (cloudMatch) {
+        const [, type, classroomId, nodeId, leafId] = cloudMatch;
+        return { classroomId, type, leafId, nodeId: nodeId || '' };
+      }
+      return null;
     },
     getMediaCandidates() {
       return [...document.querySelectorAll('video, audio')].filter(media => {
@@ -1020,7 +1170,7 @@
         return 'OCR识别出错';
       }
     },
-    async askAI(ocrText, optionCount = 0) {
+    async askAI(ocrText, optionCount = 0, questionType = 'choice') {
       const saved = Store.getAIConf();
       const API_URL = saved.url;
       const API_KEY = saved.key;
@@ -1034,9 +1184,19 @@
           reject(msg);
           return;
         }
-        const maxChar = String.fromCharCode(65 + optionCount - 1);
-        const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
-        const prompt = `
+        let prompt;
+        if (questionType === 'fillblank') {
+          prompt = `
+你是专业做题助手，请分析 OCR 文本，这是一道填空题。
+请直接给出每个空的答案文字，多个空用中文分号"；"隔开。
+输出格式必须包含“正确答案：”前缀，例如 正确答案：人工智能 或 正确答案：人工智能；机器学习
+题目内容：
+${ocrText}
+`;
+        } else {
+          const maxChar = String.fromCharCode(65 + optionCount - 1);
+          const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
+          prompt = `
 你是专业做题助手，请分析 OCR 文本，判断题型后给出答案。
 强约束：
 1) 本题只有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}
@@ -1045,7 +1205,10 @@
 题目内容：
 ${ocrText}
 `;
-        const systemPrompt = "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。";
+        }
+        const systemPrompt = questionType === 'fillblank'
+          ? "你是一个只输出答案的助手。填空题直接输出答案文字，多个空用分号隔开。"
+          : "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。";
 
         // 构建认证 header
         const authHeader = AUTH_METHOD === 'x-api-key'
@@ -1149,26 +1312,93 @@ ${ocrText}
         }
       });
     },
-    async autoSelectAndSubmit(aiResponse, itemBodyElement) {
-      const match = aiResponse.match(/(?:正确)?答案[：:]?\s*([A-F]+(?:[,，][A-F]+)*|[对错]|正确|错误)/i);
-      if (!match) {
-        panel.log('⚠️ 未提取到有效选项，请人工检查');
-        return;
-      }
-      let answerRaw = match[1].replace(/[,，]/g, '').trim();
-      const map = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5 };
-      let targetIndices = [];
-      if (answerRaw === '对' || answerRaw === '正确') {
-        targetIndices = [0];
-      } else if (answerRaw === '错' || answerRaw === '错误') {
-        targetIndices = [1];
-      } else {
-        for (const char of answerRaw.toUpperCase()) {
-          if (map[char] !== undefined) targetIndices.push(map[char]);
+    detectQuestionType(itemBodyElement) {
+      const typeEl = itemBodyElement.querySelector('.item-type')
+        || itemBodyElement.closest('.container-problem')?.querySelector('.item-type')
+        || itemBodyElement.closest('.question-wrap')?.querySelector('.item-type')
+        || itemBodyElement.closest('.problem-wrap')?.querySelector('.item-type');
+      const typeText = typeEl?.innerText?.trim() || '';
+      if (/填空/.test(typeText)) return 'fillblank';
+      if (/判断/.test(typeText)) return 'truefalse';
+      if (/选择/.test(typeText)) return 'choice';
+      // 未标明题型时，根据输入框/填空下划线判断填空
+      const inputs = itemBodyElement.querySelectorAll('input[type="text"], input:not([type]), textarea, [contenteditable="true"], .blank, .fill-blank, .fillblank, [class*="blank"]');
+      if (inputs.length > 0) return 'fillblank';
+      return 'choice';
+    },
+
+    async fillBlanks(answerText, itemBodyElement) {
+      const answers = answerText.split(/[;；|/,，]/).map(s => s.trim()).filter(Boolean);
+      // 先尝试真正的 input/textarea/contenteditable
+      let inputs = [...itemBodyElement.querySelectorAll('input[type="text"], input:not([type]), textarea, [contenteditable="true"]')]
+        .filter(el => el.offsetParent !== null);
+
+      // 如果没有，尝试可点击的填空占位元素
+      if (!inputs.length) {
+        const blanks = [...itemBodyElement.querySelectorAll('.blank, .fill-blank, .fillblank, [class*="blank"], [class*="fillblank"]')]
+          .filter(el => el.offsetParent !== null);
+        for (const blank of blanks) {
+          blank.click();
+          await Utils.sleep(300);
+          const input = document.querySelector('input:focus, textarea:focus, [contenteditable="true"]:focus')
+            || itemBodyElement.querySelector('input[type="text"], input:not([type]), textarea, [contenteditable="true"]');
+          if (input) inputs.push(input);
         }
       }
-      if (!targetIndices.length) return;
-      panel.log(`✅ AI 建议选：${answerRaw}`);
+
+      if (!inputs.length) {
+        panel.log('⚠️ 未找到填空输入框');
+        return;
+      }
+      panel.log(`✅ AI 建议填空：${answers.join('；')}`);
+      for (let i = 0; i < inputs.length; i++) {
+        const value = answers[i] || answers[answers.length - 1] || '';
+        const input = inputs[i];
+        input.scrollIntoView({ behavior: 'instant', block: 'center' });
+        input.focus();
+        if (input.isContentEditable) {
+          input.innerText = value;
+        } else {
+          input.value = value;
+        }
+        ['focus', 'input', 'change', 'blur'].forEach(evt => {
+          input.dispatchEvent(new Event(evt, { bubbles: true }));
+        });
+        input.blur();
+        await Utils.sleep(300);
+      }
+    },
+
+    async autoSelectAndSubmit(aiResponse, itemBodyElement) {
+      const questionType = this.detectQuestionType(itemBodyElement);
+
+      if (questionType === 'fillblank') {
+        const match = aiResponse.match(/(?:正确)?答案[：:]?\s*(.+)/i);
+        if (!match) {
+          panel.log('⚠️ 未提取到填空答案，请人工检查');
+          return;
+        }
+        await this.fillBlanks(match[1], itemBodyElement);
+      } else {
+        const match = aiResponse.match(/(?:正确)?答案[：:]?\s*([A-F]+(?:[,，][A-F]+)*|[对错]|正确|错误)/i);
+        if (!match) {
+          panel.log('⚠️ 未提取到有效选项，请人工检查');
+          return;
+        }
+        let answerRaw = match[1].replace(/[,，]/g, '').trim();
+        const map = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5 };
+        let targetIndices = [];
+        if (answerRaw === '对' || answerRaw === '正确') {
+          targetIndices = [0];
+        } else if (answerRaw === '错' || answerRaw === '错误') {
+          targetIndices = [1];
+        } else {
+          for (const char of answerRaw.toUpperCase()) {
+            if (map[char] !== undefined) targetIndices.push(map[char]);
+          }
+        }
+        if (!targetIndices.length) return;
+        panel.log(`✅ AI 建议选：${answerRaw}`);
 
       const listContainer = itemBodyElement.querySelector('.list-inline.list-unstyled-radio') ||
         itemBodyElement.querySelector('.list-unstyled.list-unstyled-radio') ||
@@ -1196,6 +1426,8 @@ ${ocrText}
         clickable.click();
         await Utils.sleep(150);
       }
+      }
+
       const submitBtn = (() => {
         const ownerDocument = itemBodyElement.ownerDocument || document;
         const roots = [itemBodyElement.parentElement, itemBodyElement, ownerDocument].filter(Boolean);
@@ -1226,10 +1458,27 @@ ${ocrText}
     constructor(panel) {
       this.panel = panel;
       this.baseUrl = location.href;
+      this.courseListUrl = '';
       const { current } = Store.getProgress(this.baseUrl);
       this.outside = current.outside;
       this.inside = current.inside;
       this.shouldStop = false;
+    }
+
+    setCourseListUrl() {
+      if (!this.courseListUrl && document.querySelector('.logs-list')) {
+        this.courseListUrl = location.href;
+      }
+    }
+
+    async returnToList() {
+      const target = this.courseListUrl || this.baseUrl;
+      if (target && location.href !== target) {
+        location.href = target;
+      } else {
+        history.back();
+      }
+      await Utils.sleep(1500);
     }
 
     updateProgress(outside, inside = 0) {
@@ -1276,14 +1525,20 @@ ${ocrText}
 
     async run() {
       this.panel.log(`检测到已播放到第 ${this.outside} 集，继续刷课...`);
+      let missingListCount = 0;
       while (true) {
         await this.autoSlide();
         const list = document.querySelector('.logs-list')?.childNodes;
         if (!list || !list.length) {
-          this.panel.log('未找到课程列表，稍后重试');
+          missingListCount++;
+          if (missingListCount <= 3) {
+            this.panel.log('未找到课程列表，稍后重试');
+          }
           await Utils.sleep(2000);
           continue;
         }
+        missingListCount = 0;
+        this.setCourseListUrl();
         console.log(`当前集数:${this.outside}/全部集数${list.length}`);
         if (this.outside >= list.length) {
           this.panel.log('课程刷完啦 🎉');
@@ -1299,6 +1554,7 @@ ${ocrText}
           continue;
         }
         const type = course.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang';
+        const tagText = course.querySelector('.tag')?.innerText?.trim() || '';
         const title = course.querySelector('h2')?.innerText?.trim() || `第${this.outside + 1}项`;
         
         // 预检查完成状态
@@ -1323,6 +1579,9 @@ ${ocrText}
           await this.handleClassroom(course);
         } else if (type.includes('kejian')) {
           await this.handleCourseware(course);
+        } else if (type.includes('zuoye') || type.includes('lianxi') || type.includes('ceping') || tagText.includes('作业') || tagText.includes('练习')) {
+          await this.handleHomework(course, this.inside);
+          this.updateProgress(this.outside + 1, 0);
         } else if (type.includes('kaoshi')) {
           this.panel.log('考试区域脚本会被屏蔽，已跳过');
           this.updateProgress(this.outside + 1, 0);
@@ -1350,14 +1609,15 @@ ${ocrText}
       const title = document.querySelector('.title')?.innerText || '视频';
       const isDeadline = document.querySelector('.box')?.innerText.includes('已过考核截止时间');
       if (isDeadline) this.panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
-      Player.applySpeed();
-      Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
-      await Utils.poll(() => isDeadline || Utils.isProgressDone(progressNode?.innerHTML), { interval: 5000, timeout: await Utils.getDDL() });
-      stopObserve();
+      const video = document.querySelector('video');
+      const ok = await Player.waitForFullPlayback(video, progressNode, {
+        title,
+        onLog: msg => this.panel.log(msg)
+      });
+      if (!ok) this.panel.log(`${title} 播放完成度未达 100%，已尝试多次`);
+      else this.panel.log(`${title} 播放完成`);
       this.updateProgress(this.outside + 1, 0);
-      history.back();
-      await Utils.sleep(1200);
+      await this.returnToList();
     }
 
     async handleBatch(course, list) {
@@ -1422,8 +1682,7 @@ ${ocrText}
       this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
-      history.back();
-      await Utils.sleep(1500);
+      await this.returnToList();
       return idx;
     }
 
@@ -1432,17 +1691,17 @@ ${ocrText}
       item.click();
       if (await this.waitForExternalHandoff()) return idx;
       await Utils.sleep(2500);
-      Player.applySpeed();
-      Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
+      const video = document.querySelector('video');
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
-      await Utils.poll(() => Utils.isProgressDone(progressNode?.innerHTML), { interval: 3000, timeout: await Utils.getDDL() });
-      stopObserve();
-      this.panel.log(`${title} 播放完成`);
+      const ok = await Player.waitForFullPlayback(video, progressNode, {
+        title,
+        onLog: msg => this.panel.log(msg)
+      });
+      if (!ok) this.panel.log(`${title} 播放完成度未达 100%，已尝试多次`);
+      else this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
-      history.back();
-      await Utils.sleep(1500);
+      await this.returnToList();
       return idx;
     }
 
@@ -1457,8 +1716,7 @@ ${ocrText}
         this.panel.log(`${typeText}已查看，但未开启自动回复功能`);
         idx++;
         this.updateProgress(this.outside, idx);
-        history.back();
-        await Utils.sleep(1000);
+        await this.returnToList();
         return idx;
       }
        
@@ -1505,8 +1763,7 @@ ${ocrText}
       }
       idx++;
       this.updateProgress(this.outside, idx);
-      history.back();
-      await Utils.sleep(1000);
+      await this.returnToList();
       return idx;
     }
 
@@ -1524,7 +1781,7 @@ ${ocrText}
       let i = 0;
       const maxRetry = 3; // 最大重试次数
       while (true) {
-        const items = document.querySelectorAll('.subject-item.J_order');
+        const items = document.querySelectorAll('.subject-item.J_order, .subject-item, [class*="question-index"], [class*="problem-index"]');
         if (i >= items.length) {
           this.panel.log(`所有题目处理完毕，共 ${items.length} 题，准备交卷`);
           break;
@@ -1532,19 +1789,36 @@ ${ocrText}
         const listItem = items[i];
         listItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
         listItem.click();
-        await Utils.sleep(1800);
-        const disabled = document.querySelectorAll('.el-button.el-button--info.is-disabled.is-plain');
-        if (disabled.length > 0) {
+        await Utils.sleep(2200);
+
+        const targetEl = document.querySelector('.item-type')?.parentElement || document.querySelector('.item-body') || document.querySelector('.container-problem');
+
+        // 判断本题是否已完成：看当前题面或题号标签上的状态
+        const isAnswered = AiWorkspace.isExerciseAnswered(targetEl)
+          || listItem.className?.includes('done')
+          || listItem.className?.includes('completed')
+          || listItem.className?.includes('correct')
+          || listItem.className?.includes('finished')
+          || /已完成|已作答|已提交|回答正确|回答错误|对|✓|✔/.test(listItem.innerText || '');
+
+        if (isAnswered) {
           this.panel.log(`第 ${i + 1} 题已完成，跳过...`);
           i++;
           continue;
         }
-        const targetEl = document.querySelector('.item-type')?.parentElement || document.querySelector('.item-body');
+        const questionType = Solver.detectQuestionType(targetEl);
         let optionCount = 0;
-        const listContainer = targetEl?.querySelector('.list-inline.list-unstyled-radio') ||
-          targetEl?.querySelector('.list-unstyled.list-unstyled-radio') ||
-          targetEl?.querySelector('ul.list');
-        if (listContainer) optionCount = listContainer.querySelectorAll('li').length;
+        if (questionType !== 'fillblank') {
+          const listContainer = targetEl?.querySelector('.list-inline.list-unstyled-radio') ||
+            targetEl?.querySelector('.list-unstyled.list-unstyled-radio') ||
+            targetEl?.querySelector('ul.list');
+          if (listContainer) optionCount = listContainer.querySelectorAll('li').length;
+          if (!optionCount) {
+            this.panel.log(`第 ${i + 1} 题未找到选项，跳过`);
+            i++;
+            continue;
+          }
+        }
         const ocrResult = await Solver.recognize(targetEl);
         if (ocrResult && ocrResult.length > 5) {
           let retryCount = 0;
@@ -1555,7 +1829,7 @@ ${ocrText}
                 this.panel.log(`🔄 第 ${i + 1} 题重试 ${retryCount}/${maxRetry}...`);
               }
               panel.log('🤖 请求 AI 获取答案...');
-              const aiText = await Solver.askAI(ocrResult, optionCount);
+              const aiText = await Solver.askAI(ocrResult, optionCount, questionType);
               await Solver.autoSelectAndSubmit(aiText, targetEl);
               success = true;
             } catch (err) {
@@ -1573,10 +1847,20 @@ ${ocrText}
         await Utils.sleep(1500);
         i++;
       }
+
+      // 尝试点击整体交卷/提交按钮
+      const submitAllBtn = AiWorkspace.getExerciseActionButton(document, /交卷|提交作业|提交答案|确认提交/);
+      if (submitAllBtn) {
+        this.panel.log('已找到交卷按钮，正在提交...');
+        submitAllBtn.click();
+        await Utils.sleep(1500);
+      } else {
+        this.panel.log('未找到整体交卷按钮，可能已经自动保存');
+      }
+
       idx++;
       this.updateProgress(this.outside, idx);
-      history.back();
-      await Utils.sleep(1200);
+      await this.returnToList();
       return idx;
     }
 
@@ -1593,16 +1877,19 @@ ${ocrText}
       const video = iframe.contentDocument.querySelector('video');
       const audio = iframe.contentDocument.querySelector('audio');
       if (video) {
+        await Player.playFromStart(video);
+        await Player.startPlayback(video);
         Player.applyMediaDefault(video);
         await Player.waitForEnd(video);
       }
       if (audio) {
+        await Player.playFromStart(audio);
+        await Player.startPlayback(audio);
         Player.applyMediaDefault(audio);
         await Player.waitForEnd(audio);
       }
       this.updateProgress(this.outside + 1, 0);
-      history.go(-1);
-      await Utils.sleep(1200);
+      await this.returnToList();
     }
 
     async handleCourseware(course) {
@@ -1615,53 +1902,33 @@ ${ocrText}
       }
       course.click();
       await Utils.sleep(3000);
-      
+
       // 检测"查看课件"按钮（课件概况页专用）
       const checkBtn = document.querySelector('.ppt_img_box .check') || document.querySelector('p.check');
-      if (checkBtn && checkBtn.innerText?.trim() === '查看课件') {
+      if (checkBtn && /查看课件|查看PPT|查看幻灯片/i.test(checkBtn.innerText?.trim() || '')) {
         this.panel.log('检测到"查看课件"按钮，正在点击...');
         checkBtn.click();
         await Utils.sleep(2000);
       }
+
       const classType = document.querySelector('.el-card__header')?.innerText || '';
       const className = document.querySelector('.dialog-header')?.firstElementChild?.innerText || '课件';
-      if (classType.includes('PPT')) {
-        const slides = document.querySelector('.swiper-wrapper')?.children || [];
-        this.panel.log(`开始播放 PPT：${className}`);
-        for (let i = 0; i < slides.length; i++) {
-          slides[i].click();
-          this.panel.log(`${className}：第 ${i + 1} 张`);
-          await Utils.sleep(Config.pptInterval);
-        }
-        await Utils.sleep(Config.pptInterval);
-        const videoBoxes = document.querySelectorAll('.video-box');
-        if (videoBoxes?.length) {
-          this.panel.log('PPT 中有视频，继续播放');
-          for (let i = 0; i < videoBoxes.length; i++) {
-            if (videoBoxes[i].innerText === '已完成') {
-              this.panel.log(`第 ${i + 1} 个视频已完成，跳过`);
-              continue;
-            }
-            videoBoxes[i].click();
-            await Utils.sleep(2000);
-            Player.applySpeed();
-            const muteBtn = document.querySelector('.xt_video_player_common_icon');
-            muteBtn && muteBtn.click();
-            const stopObserve = Player.observePause(document.querySelector('video'));
-            await Utils.poll(() => {
-              const allTime = document.querySelector('.xt_video_player_current_time_display')?.innerText || '';
-              const [nowTime, totalTime] = allTime.split(' / ');
-              return nowTime && totalTime && nowTime === totalTime;
-            }, { interval: 800, timeout: await Utils.getDDL() });
-            stopObserve();
-          }
-        }
-        this.panel.log(`${className} 已播放完毕`);
+      const isPPT = classType.includes('PPT')
+        || location.pathname.includes('/ppt')
+        || Boolean(document.querySelector('.swiper-wrapper'))
+        || Boolean(document.querySelector('.ppt-container'))
+        || Boolean(document.querySelector('[class*="ppt-slide"]'));
+
+      if (isPPT) {
+        await this.playPPTSlides(className);
       } else {
         const videoBox = document.querySelector('.video-box');
         if (videoBox) {
           videoBox.click();
           await Utils.sleep(1800);
+          const cwVideo = document.querySelector('video');
+          await Player.playFromStart(cwVideo);
+          await Player.startPlayback(cwVideo);
           Player.applySpeed();
           const muteBtn = document.querySelector('.xt_video_player_common_icon');
           muteBtn && muteBtn.click();
@@ -1674,8 +1941,216 @@ ${ocrText}
         }
       }
       this.updateProgress(this.outside + 1, 0);
-      history.back();
-      await Utils.sleep(1000);
+      await this.returnToList();
+    }
+
+    getSlideReadStatus(slide) {
+      if (!slide) return 'unknown';
+      const cls = slide.className || '';
+      // 明确的已读标记
+      const readClasses = ['read', 'is-read', 'visited', 'completed', 'done', 'is-viewed', 'watched'];
+      for (const c of readClasses) {
+        if (cls.includes(c)) return true;
+      }
+      // 内部存在已读图标/文字
+      if (slide.querySelector('.read, .is-read, .visited, .completed, .done, .is-viewed, .icon-check, .el-icon-check')) {
+        return true;
+      }
+      const text = (slide.innerText || '').trim();
+      if (/已读|已完成|已观看/.test(text)) return true;
+
+      // active/current 只代表当前页，不代表已读
+      const activeClasses = ['active', 'is-active', 'current', 'swiper-slide-active'];
+      for (const c of activeClasses) {
+        if (cls.includes(c)) return 'unknown';
+      }
+      return 'unknown';
+    }
+
+    resolveSlides(slideSelectors) {
+      // 先尝试从页码指示器获取真实总页数
+      const indicatorSelectors = [
+        '.swiper-pagination-bullet-active',
+        '.page-indicator',
+        '.ppt-page-number',
+        '[class*="pagination"][class*="active"]'
+      ];
+      let expectedCount = 0;
+      for (const sel of indicatorSelectors) {
+        const el = document.querySelector(sel);
+        const text = el?.innerText?.trim() || '';
+        const m = text.match(/(\d+)\s*\/\s*(\d+)/);
+        if (m) {
+          expectedCount = parseInt(m[2], 10);
+          break;
+        }
+      }
+
+      // 收集所有候选 slide 集合
+      const candidates = [];
+      for (const selector of slideSelectors) {
+        const els = [...document.querySelectorAll(selector)].filter(el => el.offsetParent !== null);
+        if (els.length <= 1) continue;
+
+        // 按 data-swiper-slide-index / aria-label / 内容去重（loop 模式复制 slide 会产生相同 index）
+        const seen = new Set();
+        const deduped = [];
+        for (const el of els) {
+          const key = el.getAttribute('data-swiper-slide-index')
+            || el.getAttribute('aria-label')
+            || el.innerHTML?.slice(0, 200);
+          if (!seen.has(key)) {
+            seen.add(key);
+            deduped.push(el);
+          }
+        }
+
+        // 计算平均面积，用于区分主视图和缩略图
+        const avgArea = deduped.reduce((sum, el) => {
+          const rect = el.getBoundingClientRect();
+          return sum + rect.width * rect.height;
+        }, 0) / deduped.length;
+
+        candidates.push({ selector, slides: deduped, avgArea, count: deduped.length });
+      }
+
+      if (!candidates.length) return [];
+
+      // 优先匹配页码指示器数量
+      if (expectedCount > 0) {
+        const match = candidates.find(c => c.count === expectedCount)
+          || candidates.reduce((best, c) => Math.abs(c.count - expectedCount) < Math.abs(best.count - expectedCount) ? c : best, candidates[0]);
+        if (match) {
+          this.panel.log(`检测到页码指示器共 ${expectedCount} 张，使用选择器 ${match.selector}（${match.count} 张）`);
+          return match.slides;
+        }
+      }
+
+      // 否则选择平均面积最大的（主视图而非缩略图）
+      candidates.sort((a, b) => b.avgArea - a.avgArea);
+      const best = candidates[0];
+      this.panel.log(`选择最大幻灯片区域：${best.selector}，共 ${best.count} 张`);
+      return best.slides;
+    }
+
+    async playPPTSlides(className) {
+      this.panel.log(`开始播放 PPT：${className}`);
+
+      // 多候选选择器：兼容弹窗式/内嵌式/新版雨课堂 PPT
+      // 注意：swiper loop 模式会复制首尾 slide 产生 swiper-slide-duplicate，需要排除
+      const slideSelectors = [
+        '.swiper-wrapper > .swiper-slide:not(.swiper-slide-duplicate)',
+        '.swiper-wrapper > .swiper-slide',
+        '.ppt-slide:not(.swiper-slide-duplicate)',
+        '.slide-page',
+        '.ppt-container .slide',
+        '.ppt-content .page',
+        '[class*="ppt-slide"]:not(.swiper-slide-duplicate)',
+        '[class*="slide-page"]',
+        '.ppt-viewer .page'
+      ];
+
+      const slides = this.resolveSlides(slideSelectors);
+
+      if (slides.length > 0) {
+        // 尝试识别已读/未读：如果任意 slide 能识别出已读状态，就只刷未读页
+        const readStatuses = slides.map(s => this.getSlideReadStatus(s));
+        const canDetectRead = readStatuses.some(s => s === true);
+        if (canDetectRead) {
+          this.panel.log('检测到幻灯片已读/未读状态，将跳过已读页');
+        }
+
+        for (let i = 0; i < slides.length; i++) {
+          if (readStatuses[i] === true) {
+            this.panel.log(`${className}：第 ${i + 1}/${slides.length} 张已读，跳过`);
+            continue;
+          }
+          slides[i].scrollIntoView({ behavior: 'instant', block: 'nearest' });
+          slides[i].click();
+          this.panel.log(`${className}：第 ${i + 1}/${slides.length} 张`);
+          await Utils.sleep(Config.pptInterval);
+        }
+      } else {
+        this.panel.log('未找到幻灯片列表，尝试按翻页按钮/键盘翻页...');
+        await this.playPPTByNavigation(className);
+      }
+
+      await Utils.sleep(Config.pptInterval);
+
+      const videoBoxes = document.querySelectorAll('.video-box');
+      if (videoBoxes?.length) {
+        this.panel.log('PPT 中有视频，继续播放');
+        for (let i = 0; i < videoBoxes.length; i++) {
+          if (videoBoxes[i].innerText === '已完成') {
+            this.panel.log(`第 ${i + 1} 个视频已完成，跳过`);
+            continue;
+          }
+          videoBoxes[i].click();
+          await Utils.sleep(2000);
+          const pptVideo = document.querySelector('video');
+          await Player.playFromStart(pptVideo);
+          await Player.startPlayback(pptVideo);
+          Player.applySpeed();
+          const muteBtn = document.querySelector('.xt_video_player_common_icon');
+          muteBtn && muteBtn.click();
+          const stopObserve = Player.observePause(pptVideo);
+          await Utils.poll(() => {
+            const allTime = document.querySelector('.xt_video_player_current_time_display')?.innerText || '';
+            const [nowTime, totalTime] = allTime.split(' / ');
+            return nowTime && totalTime && nowTime === totalTime;
+          }, { interval: 800, timeout: await Utils.getDDL() });
+          stopObserve();
+        }
+      }
+      this.panel.log(`${className} 已播放完毕`);
+    }
+
+    async playPPTByNavigation(className) {
+      const nextSelectors = [
+        '.swiper-button-next',
+        '.ppt-next',
+        '.next-page',
+        '[class*="next"][class*="page"]',
+        '[class*="arrow-right"]',
+        '.btn-next-slide'
+      ];
+      let nextBtn = null;
+      for (const selector of nextSelectors) {
+        nextBtn = document.querySelector(selector);
+        if (nextBtn && nextBtn.offsetParent !== null) break;
+      }
+
+      let lastPage = '';
+      let sameCount = 0;
+      let pageNum = 0;
+      const maxPages = 200;
+
+      while (sameCount < 3 && pageNum < maxPages) {
+        const indicator = document.querySelector('.swiper-pagination-bullet-active')
+          || document.querySelector('.page-indicator')
+          || document.querySelector('.ppt-page-number')
+          || document.querySelector('[class*="pagination"][class*="active"]');
+        const currentPage = indicator?.innerText?.trim() || '';
+
+        if (currentPage && currentPage === lastPage) {
+          sameCount++;
+        } else {
+          sameCount = 0;
+          lastPage = currentPage;
+          pageNum++;
+          this.panel.log(`${className}：第 ${pageNum} 页${currentPage ? `（${currentPage}）` : ''}`);
+        }
+
+        if (nextBtn) {
+          nextBtn.click();
+        } else {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true }));
+          document.dispatchEvent(new KeyboardEvent('keyup', { key: 'ArrowRight', code: 'ArrowRight', bubbles: true }));
+        }
+        await Utils.sleep(Config.pptInterval);
+      }
+
+      this.panel.log(`${className} PPT 翻页结束，共 ${pageNum} 页`);
     }
   }
 
@@ -1736,7 +2211,9 @@ ${ocrText}
             videoTimer = setInterval(() => {
               const video = document.querySelector('video');
               if (video) {
-                setTimeout(() => {
+                setTimeout(async () => {
+                  await Player.playFromStart(video);
+                  await Player.startPlayback(video);
                   Player.applySpeed();
                   Player.mute();
                   Player.observePause(video);
@@ -1858,6 +2335,11 @@ ${ocrText}
       const playbackState = { completed: false };
       const shouldResume = () => !playbackState.completed;
       let stopObserve = () => { };
+
+      // 确保从开头播放，避免中间段未刷到
+      await Player.playFromStart(media);
+      await Player.startPlayback(media);
+
       if (media.tagName.toLowerCase() === 'video') {
         Player.applySpeed();
         Player.mute();
@@ -1868,7 +2350,7 @@ ${ocrText}
       const stopKeepAlive = AiWorkspace.keepAlive(shouldResume);
       this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${Config.playbackRate}x，静音开启`);
       try {
-        let startTime = Number(media.currentTime || 0);
+        let startTime = 0;
         const started = await Utils.poll(() => {
           const currentMedia = AiWorkspace.getMedia();
           if (currentMedia) media = currentMedia;
@@ -1930,20 +2412,24 @@ ${ocrText}
         return true;
       }
 
-      const listContainer = questionRoot.querySelector('.list-inline.list-unstyled-radio')
-        || questionRoot.querySelector('.list-unstyled.list-unstyled-radio')
-        || questionRoot.querySelector('.list-unstyled')
-        || questionRoot.querySelector('ul.list')
-        || questionRoot.querySelector('[class*="option-list"]')
-        || questionRoot.querySelector('[class*="answer-list"]')
-        || questionRoot.querySelector('ul')
-        || questionRoot.querySelector('[role="radiogroup"]');
-      const optionCount = listContainer
-        ? listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]').length
-        : 0;
-      if (!optionCount) {
-        this.panel.log(`${label || '当前题目'} 未找到选项，跳过`);
-        return false;
+      const questionType = Solver.detectQuestionType(questionRoot);
+      let optionCount = 0;
+      if (questionType !== 'fillblank') {
+        const listContainer = questionRoot.querySelector('.list-inline.list-unstyled-radio')
+          || questionRoot.querySelector('.list-unstyled.list-unstyled-radio')
+          || questionRoot.querySelector('.list-unstyled')
+          || questionRoot.querySelector('ul.list')
+          || questionRoot.querySelector('[class*="option-list"]')
+          || questionRoot.querySelector('[class*="answer-list"]')
+          || questionRoot.querySelector('ul')
+          || questionRoot.querySelector('[role="radiogroup"]');
+        optionCount = listContainer
+          ? listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]').length
+          : 0;
+        if (!optionCount) {
+          this.panel.log(`${label || '当前题目'} 未找到选项，跳过`);
+          return false;
+        }
       }
 
       const ocrResult = await Solver.recognize(questionRoot);
@@ -1957,7 +2443,7 @@ ${ocrText}
         try {
           if (retryCount > 0) this.panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
           this.panel.log('🤖 请求 AI 获取答案...');
-          const aiText = await Solver.askAI(ocrResult, optionCount);
+          const aiText = await Solver.askAI(ocrResult, optionCount, questionType);
           await Solver.autoSelectAndSubmit(aiText, questionRoot);
           await Utils.sleep(1200);
           return true;
@@ -2069,6 +2555,12 @@ ${ocrText}
     const matchURL = `${url}${path[0]}/${path[1]}/${path[2]}`;
     panel.log(`正在匹配处理逻辑：${matchURL}`);
     if (matchURL.includes('yuketang.cn/v2/web') || matchURL.includes('gdufemooc.cn/v2/web')) {
+      // v2 路线必须在课程列表页运行，避免在单个课件/视频页误启动主循环
+      if (!document.querySelector('.logs-list')) {
+        panel.resetStartButton('开始刷课');
+        panel.log('当前页面不是课程列表（缺少 .logs-list），请返回课程目录页后再开始刷课');
+        return;
+      }
       new V2Runner(panel).run();
     } else if (matchURL.includes('yuketang.cn/pro/lms') || matchURL.includes('gdufemooc.cn/pro/lms')) {
       if (document.querySelector('.btn-next')) {
