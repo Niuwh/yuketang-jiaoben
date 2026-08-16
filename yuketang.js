@@ -138,6 +138,26 @@
       const elementDurationMs = duration * 1000;               // 转为秒
       const timeout = Math.max(elementDurationMs * 3, 10_000); // 至少 10 秒（防极短视频）;
       return timeout;
+    },
+    // 关闭雨课堂的挂机/离开检测弹窗，避免遮罩拦截刷课流程
+    dismissPopups() {
+      const wrappers = document.querySelectorAll('.el-dialog__wrapper, .el-message-box__wrapper');
+      for (const wrapper of wrappers) {
+        const style = getComputedStyle(wrapper);
+        const rect = wrapper.getBoundingClientRect();
+        if (style.display === 'none' || style.visibility === 'hidden' || rect.width === 0) continue;
+        const text = wrapper.innerText || '';
+        const buttons = [...wrapper.querySelectorAll('button')];
+        const clickBtn = label => {
+          const btn = buttons.find(b => (b.innerText || '').trim().includes(label));
+          if (btn) btn.click();
+        };
+        if (text.includes('好好学习') || text.includes('继续观看')) {
+          clickBtn('继续观看');
+        } else if (text.includes('报告老师')) {
+          clickBtn('取消');
+        }
+      }
     }
   };
 
@@ -670,7 +690,13 @@
     };
 
     let startHandler = null;
+    let running = false;
     const invokeStart = () => {
+      if (running) {
+        log('已在刷课中，忽略重复启动');
+        return;
+      }
+      running = true;
       log('启动中...');
       ui.btnStart.innerText = '刷课中...';
       startHandler && startHandler();
@@ -689,6 +715,7 @@
       },
       resetStartButton(text = '开始刷课') {
         ui.btnStart.innerText = text;
+        if (text !== '刷课中...') running = false;
       }
     };
   }
@@ -731,33 +758,40 @@
     },
     observePause(video, shouldResume = () => true) {
       if (!video) return () => { };
-      const target = document.getElementsByClassName('play-btn-tip')[0];
-      if (!target) return () => { };
+      const canResume = () => shouldResume() && !video.ended && !this.isNearEnd(video);
       // 自动播放
       const playVideo = () => {
-        if (!shouldResume() || video.ended || this.isNearEnd(video)) return;
+        if (!canResume()) return;
         video.play().catch(e => {
-          if (!shouldResume() || video.ended || this.isNearEnd(video)) return;
+          if (!canResume()) return;
           console.warn('自动播放失败:', e);
           setTimeout(playVideo, 3000);
         });
       };
       playVideo();
-      const observer = new MutationObserver(list => {
-        for (const mutation of list) {
-          if (
-            mutation.type === 'childList'
-            && target.innerText === '播放'
-            && shouldResume()
-            && !video.ended
-            && !this.isNearEnd(video)
-          ) {
-            video.play();
+      // 直接监听 pause 事件，不依赖播放器 UI 元素
+      const onPause = () => { if (canResume()) playVideo(); };
+      video.addEventListener('pause', onPause);
+      // 定时兜底：防止 pause 事件被拦截
+      const timer = setInterval(() => { if (video.paused && canResume()) playVideo(); }, 5000);
+      // 播放器 UI 观察：按钮被点击暂停时 tip 变为「播放」
+      const target = document.getElementsByClassName('play-btn-tip')[0];
+      let observer = null;
+      if (target) {
+        observer = new MutationObserver(list => {
+          for (const mutation of list) {
+            if (mutation.type === 'childList' && target.innerText === '播放' && canResume()) {
+              video.play();
+            }
           }
-        }
-      });
-      observer.observe(target, { childList: true });
-      return () => observer.disconnect();
+        });
+        observer.observe(target, { childList: true });
+      }
+      return () => {
+        video.removeEventListener('pause', onPause);
+        clearInterval(timer);
+        if (observer) observer.disconnect();
+      };
     },
     waitForEnd(media, timeout = 0) {
       return new Promise(resolve => {
@@ -1280,6 +1314,13 @@ ${ocrText}
         await this.autoSlide();
         const list = document.querySelector('.logs-list')?.childNodes;
         if (!list || !list.length) {
+          // 可能停留在课件页：有目录页地址时直接跳回，避免无限重试
+          const pending = Store.getPendingAutoStart();
+          if (pending?.returnUrl && !location.pathname.includes('/studentLog/')) {
+            this.panel.log('当前页面无课程列表，返回目录页继续');
+            location.href = pending.returnUrl;
+            return;
+          }
           this.panel.log('未找到课程列表，稍后重试');
           await Utils.sleep(2000);
           continue;
@@ -1353,7 +1394,10 @@ ${ocrText}
       Player.applySpeed();
       Player.mute();
       const stopObserve = Player.observePause(document.querySelector('video'));
-      await Utils.poll(() => isDeadline || Utils.isProgressDone(progressNode?.innerHTML), { interval: 5000, timeout: await Utils.getDDL() });
+      await Utils.poll(() => {
+        Utils.dismissPopups();
+        return isDeadline || Utils.isProgressDone(progressNode?.innerHTML);
+      }, { interval: 5000, timeout: await Utils.getDDL() });
       stopObserve();
       this.updateProgress(this.outside + 1, 0);
       history.back();
@@ -1418,7 +1462,10 @@ ${ocrText}
       await Utils.sleep(2500);
       Player.applyMediaDefault(document.querySelector('audio'));
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
-      await Utils.poll(() => Utils.isProgressDone(progressNode?.innerHTML), { interval: 3000, timeout: await Utils.getDDL() });
+      await Utils.poll(() => {
+        Utils.dismissPopups();
+        return Utils.isProgressDone(progressNode?.innerHTML);
+      }, { interval: 3000, timeout: await Utils.getDDL() });
       this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
@@ -1436,7 +1483,10 @@ ${ocrText}
       Player.mute();
       const stopObserve = Player.observePause(document.querySelector('video'));
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
-      await Utils.poll(() => Utils.isProgressDone(progressNode?.innerHTML), { interval: 3000, timeout: await Utils.getDDL() });
+      await Utils.poll(() => {
+        Utils.dismissPopups();
+        return Utils.isProgressDone(progressNode?.innerHTML);
+      }, { interval: 3000, timeout: await Utils.getDDL() });
       stopObserve();
       this.panel.log(`${title} 播放完成`);
       idx++;
@@ -1649,6 +1699,7 @@ ${ocrText}
             muteBtn && muteBtn.click();
             const stopObserve = Player.observePause(document.querySelector('video'));
             await Utils.poll(() => {
+              Utils.dismissPopups();
               const allTime = document.querySelector('.xt_video_player_current_time_display')?.innerText || '';
               const [nowTime, totalTime] = allTime.split(' / ');
               return nowTime && totalTime && nowTime === totalTime;
@@ -1665,11 +1716,14 @@ ${ocrText}
           Player.applySpeed();
           const muteBtn = document.querySelector('.xt_video_player_common_icon');
           muteBtn && muteBtn.click();
+          const stopObserve = Player.observePause(document.querySelector('video'));
           await Utils.poll(() => {
+            Utils.dismissPopups();
             const times = document.querySelector('.xt_video_player_current_time_display')?.innerText || '';
             const [nowTime, totalTime] = times.split(' / ');
             return nowTime && totalTime && nowTime === totalTime;
           }, { interval: 800, timeout: await Utils.getDDL() });
+          stopObserve();
           this.panel.log(`${className} 视频播放完毕`);
         }
       }
@@ -1784,6 +1838,7 @@ ${ocrText}
           localStorage.removeItem(Config.storageKeys.proClassCount);
           this.panel.log('课程播放完毕 🎉');
           Store.clearPendingAutoStart();
+          this.panel.resetStartButton('开始刷课');
           break;
         }
       }
