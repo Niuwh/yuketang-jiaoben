@@ -1655,6 +1655,59 @@ ${ocrText}
       await Utils.sleep(1200);
     }
 
+    // 等待课件视频播放完毕；播放器被关闭（弹窗关闭/元素销毁）时自动重新打开
+    async waitCoursewareVideo() {
+      const deadline = await Utils.getDDL();
+      const start = Date.now();
+      let boundVideo = null;
+      let stopObserve = () => { };
+      let reopenAttempts = 0;
+      try {
+        while (Date.now() - start < deadline) {
+          Utils.dismissPopups();
+          const video = document.querySelector('video');
+          const display = document.querySelector('.xt_video_player_current_time_display');
+          if (!video) {
+            // 播放器被关闭或视频元素被销毁，重新打开视频框
+            const videoBox = document.querySelector('.video-box');
+            if (videoBox && !videoBox.innerText.includes('已完成')) {
+              this.panel.log('播放器被关闭，正在重新打开');
+              videoBox.click();
+              boundVideo = null;
+            }
+            reopenAttempts++;
+            if (reopenAttempts >= 4) {
+              this.panel.log('播放器恢复失败，刷新页面重试');
+              location.reload();
+              return false;
+            }
+            await Utils.sleep(2000);
+            continue;
+          }
+          reopenAttempts = 0;
+          if (!display) {
+            // 播放器加载中，等待渲染
+            await Utils.sleep(800);
+            continue;
+          }
+          if (video !== boundVideo) {
+            stopObserve();
+            Player.applySpeed();
+            Player.mute();
+            boundVideo = video;
+            stopObserve = Player.observePause(video);
+          }
+          const times = display.innerText || '';
+          const [nowTime, totalTime] = times.split(' / ');
+          if (nowTime && totalTime && nowTime === totalTime) return true;
+          await Utils.sleep(800);
+        }
+        return false;
+      } finally {
+        stopObserve();
+      }
+    }
+
     async handleCourseware(course) {
       const tableData = course.parentNode?.parentNode?.parentNode?.__vue__?.tableData;
       const deadlinePassed = (tableData?.deadline || tableData?.end) ? (tableData.deadline < Date.now() || tableData.end < Date.now()) : false;
@@ -1694,17 +1747,7 @@ ${ocrText}
             }
             videoBoxes[i].click();
             await Utils.sleep(2000);
-            Player.applySpeed();
-            const muteBtn = document.querySelector('.xt_video_player_common_icon');
-            muteBtn && muteBtn.click();
-            const stopObserve = Player.observePause(document.querySelector('video'));
-            await Utils.poll(() => {
-              Utils.dismissPopups();
-              const allTime = document.querySelector('.xt_video_player_current_time_display')?.innerText || '';
-              const [nowTime, totalTime] = allTime.split(' / ');
-              return nowTime && totalTime && nowTime === totalTime;
-            }, { interval: 800, timeout: await Utils.getDDL() });
-            stopObserve();
+            await this.waitCoursewareVideo();
           }
         }
         this.panel.log(`${className} 已播放完毕`);
@@ -1713,17 +1756,7 @@ ${ocrText}
         if (videoBox) {
           videoBox.click();
           await Utils.sleep(1800);
-          Player.applySpeed();
-          const muteBtn = document.querySelector('.xt_video_player_common_icon');
-          muteBtn && muteBtn.click();
-          const stopObserve = Player.observePause(document.querySelector('video'));
-          await Utils.poll(() => {
-            Utils.dismissPopups();
-            const times = document.querySelector('.xt_video_player_current_time_display')?.innerText || '';
-            const [nowTime, totalTime] = times.split(' / ');
-            return nowTime && totalTime && nowTime === totalTime;
-          }, { interval: 800, timeout: await Utils.getDDL() });
-          stopObserve();
+          await this.waitCoursewareVideo();
           this.panel.log(`${className} 视频播放完毕`);
         }
       }
