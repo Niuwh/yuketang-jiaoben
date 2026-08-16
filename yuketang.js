@@ -449,6 +449,12 @@
               #btn-setting {
                 background-color: #52c41a;
               }
+              #btn-stop {
+                background-color: #8c8c8c;
+              }
+              #btn-reload {
+                background-color: #fa8c16;
+              }
 
               /* 设置页底部按钮 */
               .settings-footer {
@@ -544,6 +550,8 @@
                 <button id="btn-setting">AI配置</button>
                 <button id="btn-clear">清除缓存</button>
                 <button id="btn-start">开始刷课</button>
+                <button id="btn-stop">停止刷课</button>
+                <button id="btn-reload">重新加载</button>
               </div>
             </div>
     `);
@@ -558,6 +566,8 @@
       btnStart: doc.getElementById('btn-start'),
       btnClear: doc.getElementById('btn-clear'),
       btnSetting: doc.getElementById('btn-setting'),
+      btnStop: doc.getElementById('btn-stop'),
+      btnReload: doc.getElementById('btn-reload'),
       settings: doc.getElementById('settings'),
       saveSettings: doc.getElementById('save_settings'),
       closeSettings: doc.getElementById('close_settings'),
@@ -687,6 +697,20 @@
       localStorage.removeItem(Config.storageKeys.proClassCount);
       Store.clearPendingAutoStart();
       log('已清除当前课程的刷课进度缓存');
+    };
+
+    // 停止刷课：清除自动恢复标记后刷新页面，刷新后脚本回到空闲状态（进度缓存保留）
+    ui.btnStop.onclick = () => {
+      Store.clearPendingAutoStart();
+      log('已停止刷课，页面即将刷新');
+      window.parent.location.reload();
+    };
+
+    // 重新加载：重建自动恢复标记后刷新页面，刷新后自动恢复刷课（停止后点击同样生效）
+    ui.btnReload.onclick = () => {
+      Store.setPendingAutoStart(Utils.getCurrentClassroomId());
+      log('正在重新加载脚本...');
+      window.parent.location.reload();
     };
 
     let startHandler = null;
@@ -1310,15 +1334,28 @@ ${ocrText}
 
     async run() {
       this.panel.log(`检测到已播放到第 ${this.outside} 集，继续刷课...`);
+      // 在课件页恢复时直接续播当前内容，不重新走列表流程
+      if (location.pathname.includes('/studentCards/')) {
+        const videoBox = document.querySelector('.video-box');
+        const boxText = videoBox?.innerText || '';
+        if ((videoBox || document.querySelector('video')) && !boxText.includes('已完成')) {
+          this.panel.log('检测到当前课件页，直接续播当前内容');
+          await this.waitCoursewareVideo();
+          history.back();
+          await Utils.sleep(1000);
+        }
+      }
       while (true) {
         await this.autoSlide();
         const list = document.querySelector('.logs-list')?.childNodes;
         if (!list || !list.length) {
-          // 可能停留在课件页：有目录页地址时直接跳回，避免无限重试
+          // 可能停留在课件页：跳回目录页继续，避免无限重试
           const pending = Store.getPendingAutoStart();
-          if (pending?.returnUrl && !location.pathname.includes('/studentLog/')) {
+          const returnUrl = pending?.returnUrl
+            || (pending?.classroomId ? `/v2/web/studentLog/${pending.classroomId}` : '');
+          if (returnUrl && !location.pathname.includes('/studentLog/')) {
             this.panel.log('当前页面无课程列表，返回目录页继续');
-            location.href = pending.returnUrl;
+            location.href = returnUrl;
             return;
           }
           this.panel.log('未找到课程列表，稍后重试');
