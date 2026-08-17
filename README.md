@@ -41,5 +41,9 @@
 + insorker          增加错误页面匹配提醒 && 修改倍速函数，支持3倍速
 + PRO-2684          解决了pro/lms路线雨课堂切屏检测问题
 + pioneerRick       增加了批量中图文和讨论的自动回复功能，以及使用ocr识别作业后利用大模型生成回复自动回答功能
++ 语冰              修复了panel无法插入的问题
++ ANGJustinl        添加AI伴学弹出窗口路由支持
++ tfia              增加了对 Anthropic 格式 API 和相应认证方式的支持，并增加选项供用户选择
++ xinyangcui        修复了面板增加停止刷课BUG、添加重新加载按钮
 
 如有任何问题或提议，欢迎大家访问我的网站：[https://niuwh.cn](https://niuwh.cn) ,里面有我的联系方式。或者博客留言：[https://blog.niuwh.cn](https://blog.niuwh.cn)。

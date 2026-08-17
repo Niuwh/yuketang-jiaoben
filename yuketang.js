@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.3
+// @version      3.0.4
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.2',     // 版本号
+    version: '3.0.4',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -1323,7 +1323,7 @@ ${ocrText}
         const [, current, total] = progressMatch;
         const currentNum = parseInt(current, 10);
         const totalNum = parseInt(total, 10);
-        
+
         // 根据数字进度判断：相等且大于0表示已完成
         return currentNum === totalNum && totalNum > 0;
       }
@@ -1378,20 +1378,20 @@ ${ocrText}
         }
         const type = course.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || 'piliang';
         const title = course.querySelector('h2')?.innerText?.trim() || `第${this.outside + 1}项`;
-        
+
         // 预检查完成状态
         const statusBox = course.querySelector('.statistics-box .aside');
         const statusText = statusBox?.innerText || '';
-        
+
         // 判断是否已完成
         let isCompleted = this.checkCompletionStatus(statusBox, statusText);
-        
+
         if (isCompleted) {
           this.panel.log(`✅ ${title} 已完成，跳过`);
           this.updateProgress(this.outside + 1, 0);
           continue;
         }
-        
+
         this.panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}，标题：${title}`);
         if (type.includes('shipin')) {
           await this.handleVideo(course);
@@ -1456,23 +1456,23 @@ ${ocrText}
       while (idx < activities.length) {
         const item = activities[idx];
         if (!item) break;
-        
+
         const tagText = item.querySelector('.tag')?.innerText || '';
         const tagHref = item.querySelector('.tag')?.querySelector('use')?.getAttribute('xlink:href') || '';
         const title = item.querySelector('h2')?.innerText || `第${idx + 1}项`;
-        
+
         // 检查当前项目的完成状态
         const statusBox = item.querySelector('.statistics-box .aside');
         const statusText = statusBox?.innerText || '';
         const isCompleted = this.checkCompletionStatus(statusBox, statusText);
-        
+
         if (isCompleted) {
           this.panel.log(`✅ ${title} 已完成，跳过`);
           idx++;
           this.updateProgress(this.outside, idx);
           continue;
         }
-        
+
         if (tagText === '音频') {
           idx = await this.playAudioItem(item, title, idx);
         } else if (tagHref.includes('shipin')) {
@@ -1537,7 +1537,7 @@ ${ocrText}
       this.panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
       item.click();
       await Utils.sleep(1200);
-      
+
       // 检查是否开启自动评论功能
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoComment) {
@@ -1548,7 +1548,7 @@ ${ocrText}
         await Utils.sleep(1000);
         return idx;
       }
-       
+
       // 开启了自动评论功能，执行评论逻辑
       window.scrollTo(0, document.body.scrollHeight);
       await Utils.sleep(800);
@@ -1755,7 +1755,7 @@ ${ocrText}
       }
       course.click();
       await Utils.sleep(3000);
-      
+
       // 检测"查看课件"按钮（课件概况页专用）
       const checkBtn = document.querySelector('.ppt_img_box .check') || document.querySelector('p.check');
       if (checkBtn && checkBtn.innerText?.trim() === '查看课件') {
