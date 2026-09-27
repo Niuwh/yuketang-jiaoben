@@ -819,8 +819,12 @@
       // 直接监听 pause 事件，不依赖播放器 UI 元素
       const onPause = () => { if (canResume()) playVideo(); };
       video.addEventListener('pause', onPause);
-      // 定时兜底：防止 pause 事件被拦截
-      const timer = setInterval(() => { if (video.paused && canResume()) playVideo(); }, 5000);
+      // 定时兜底：防止 pause 事件被拦截（缩短到 1.5s，降低“断断续续”的卡顿感）
+      const timer = setInterval(() => { if (video.paused && canResume()) playVideo(); }, 1500);
+      // 标签页重新可见/重新获得焦点时立即尝试恢复，避免后台节流后长时间不续播
+      const onVisible = () => { if (!document.hidden && canResume()) playVideo(); };
+      document.addEventListener('visibilitychange', onVisible);
+      window.addEventListener('focus', onVisible);
       // 播放器 UI 观察：按钮被点击暂停时 tip 变为「播放」
       const target = document.getElementsByClassName('play-btn-tip')[0];
       let observer = null;
@@ -837,6 +841,8 @@
       return () => {
         video.removeEventListener('pause', onPause);
         clearInterval(timer);
+        document.removeEventListener('visibilitychange', onVisible);
+        window.removeEventListener('focus', onVisible);
         if (observer) observer.disconnect();
       };
     },
@@ -1458,11 +1464,16 @@ ${ocrText}
       if (isDeadline) this.panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
       Player.applySpeed();
       Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
+      const video = document.querySelector('video');
+      const stopObserve = Player.observePause(video);
       await Utils.poll(() => {
         Utils.dismissPopups();
         return isDeadline || Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 5000, timeout: await Utils.getDDL() });
+      // 关键修复：98%/99% 不代表真播完，必须等视频真正 ended，否则服务端记不满 100%
+      if (!isDeadline && video) {
+        await Player.waitForEnd(video, 180000);
+      }
       stopObserve();
       this.updateProgress(this.outside + 1, 0);
       history.back();
@@ -1525,12 +1536,17 @@ ${ocrText}
       item.click();
       if (await this.waitForExternalHandoff()) return idx;
       await Utils.sleep(2500);
-      Player.applyMediaDefault(document.querySelector('audio'));
+      const audio = document.querySelector('audio');
+      Player.applyMediaDefault(audio);
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       await Utils.poll(() => {
         Utils.dismissPopups();
         return Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 3000, timeout: await Utils.getDDL() });
+      // 音频同样要等真正播完，避免进度记不满
+      if (audio) {
+        await Player.waitForEnd(audio, 180000);
+      }
       this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
@@ -1546,12 +1562,17 @@ ${ocrText}
       await Utils.sleep(2500);
       Player.applySpeed();
       Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
+      const video = document.querySelector('video');
+      const stopObserve = Player.observePause(video);
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       await Utils.poll(() => {
         Utils.dismissPopups();
         return Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 3000, timeout: await Utils.getDDL() });
+      // 关键修复：进度到 98% 不代表播完，必须等视频真正 ended 再跳下一集
+      if (video) {
+        await Player.waitForEnd(video, 180000);
+      }
       stopObserve();
       this.panel.log(`${title} 播放完成`);
       idx++;
@@ -1905,6 +1926,11 @@ ${ocrText}
               const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
               return status.includes('100%') || status.includes('99%') || status.includes('98%') || status.includes('已完成');
             }, { interval: 1000, timeout: await Utils.getDDL() });
+            // 关键修复：进度到 98% 不代表播完，必须等视频真正 ended，否则服务端记不满 100%
+            const videoEl = document.querySelector('video');
+            if (videoEl) {
+              await Player.waitForEnd(videoEl, 180000);
+            }
           } finally {
             if (statusTimer) clearInterval(statusTimer);
             if (videoTimer) clearInterval(videoTimer);
