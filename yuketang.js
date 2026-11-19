@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.6
+// @version      3.0.7
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.6',     // 版本号
+    version: '3.0.7',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -220,6 +220,7 @@
       const conf = {
         autoAI: saved.autoAI ?? false,
         autoComment: saved.autoComment ?? false,
+        useOCR: saved.useOCR ?? true, // 是否启用 OCR 识题（关闭后截图直传多模态模型）
       };
       localStorage.setItem(Config.storageKeys.feature, JSON.stringify(conf));
       return conf;
@@ -416,6 +417,14 @@
                 width: auto;
               }
 
+              /* 表单项提示文案 */
+              .form-item .hint {
+                margin-top: 4px;
+                font-size: 11px;
+                color: #999;
+                line-height: 1.5;
+              }
+
               /* 底部按钮栏 */
               .footer {
                 position: absolute;
@@ -521,6 +530,7 @@
                 <div class="form-item">
                   <label>Model Name:</label>
                   <input type="text" id="ai_model" placeholder="deepseek-chat">
+                  <div class="hint">提示：若模型支持图片输入（多模态/视觉，如 GPT-4o、Claude 3.5+、Qwen-VL），可关闭下方 OCR 开关，截图将直接发给模型识别</div>
                 </div>
                 <div class="form-item">
                   <label>API Format:</label>
@@ -544,6 +554,13 @@
                 </div>
                 <div class="form-item">
                   <label class="checkbox-label">
+                    <input type="checkbox" id="feature_use_ocr">
+                    启用 OCR 识别题目
+                  </label>
+                  <div class="hint">开启：截图经 OCR 识别后把文本发给模型（默认，所有模型可用）；关闭：截图直接发给多模态模型作答（请自行确认模型支持图片输入）</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
                     <input type="checkbox" id="feature_auto_comment">
                     用批量区图文/讨论自动回复
                   </label>
@@ -555,7 +572,7 @@
               </div>
               <div class="footer">
                 <button id="btn-setting">AI配置</button>
-                <button id="btn-clear">清除缓存</button>
+                <button id="btn-clear">清除课程进度缓存</button>
                 <button id="btn-start">开始刷课</button>
                 <button id="btn-stop">停止刷课</button>
                 <button id="btn-reload">重新加载</button>
@@ -584,6 +601,7 @@
       aiFormatSelect: doc.getElementById('ai_format'),
       authMethodSelect: doc.getElementById('auth_method'),
       featureAutoAI: doc.getElementById('feature_auto_ai'),
+      featureUseOCR: doc.getElementById('feature_use_ocr'),
       featureAutoComment: doc.getElementById('feature_auto_comment'),
       minimality: doc.getElementById('minimality'),
       question: doc.getElementById('question'),
@@ -684,6 +702,7 @@
       const saved = Store.getFeatureConf();
       ui.featureAutoAI.checked = saved.autoAI;
       ui.featureAutoComment.checked = saved.autoComment;
+      ui.featureUseOCR.checked = saved.useOCR;
     };
     loadAIConf();
     loadFeatureConf();
@@ -706,11 +725,15 @@
       Store.setAIConf(conf);
       const featureConf = {
         autoAI: ui.featureAutoAI.checked,
-        autoComment: ui.featureAutoComment.checked
+        autoComment: ui.featureAutoComment.checked,
+        useOCR: ui.featureUseOCR.checked
       };
       Store.setFeatureConf(featureConf);
       ui.settings.style.display = 'none';
       log('✅ AI 配置已保存');
+      if (!featureConf.useOCR) {
+        log('已关闭 OCR：答题时截图将直接发送给多模态模型');
+      }
     };
 
     ui.btnClear.onclick = () => {
@@ -723,8 +746,7 @@
     // 停止刷课：清除自动恢复标记后刷新页面，刷新后脚本回到空闲状态（进度缓存保留）
     ui.btnStop.onclick = () => {
       Store.clearPendingAutoStart();
-      log('已停止刷课，页面即将刷新');
-      window.parent.location.reload();
+      log('已停止刷课');
     };
 
     // 重新加载：重建自动恢复标记后刷新页面，刷新后自动恢复刷课（停止后点击同样生效）
@@ -1081,16 +1103,24 @@
 
   // ---- OCR & AI ----
   const Solver = {
+    // 解析答题模式：OCR 开启走 OCR 识别（原行为），关闭即认为模型支持图片输入，截图直传
+    resolveAnswerMode() {
+      return Store.getFeatureConf().useOCR ? 'ocr' : 'vision';
+    },
+    // 两条路径共用的截图逻辑
+    async capture(element) {
+      panel.log('正在截图...');
+      return html2canvas(element, {
+        useCORS: true,
+        logging: false,
+        scale: 2,
+        backgroundColor: '#ffffff'
+      });
+    },
     async recognize(element) {
       if (!element) return '无元素';
       try {
-        panel.log('正在截图...');
-        const canvas = await html2canvas(element, {
-          useCORS: true,
-          logging: false,
-          scale: 2,
-          backgroundColor: '#ffffff'
-        });
+        const canvas = await this.capture(element);
         panel.log('正在 OCR 识别 (首轮较慢)...');
         const { data: { text } } = await Tesseract.recognize(canvas, 'chi_sim', {
           logger: m => {
@@ -1106,23 +1136,43 @@
         return 'OCR识别出错';
       }
     },
-    async askAI(ocrText, optionCount = 0) {
-      const saved = Store.getAIConf();
-      const API_URL = saved.url;
-      const API_KEY = saved.key;
-      const MODEL_NAME = saved.model;
-      const API_FORMAT = saved.apiFormat || 'openai';
-      const AUTH_METHOD = saved.authMethod || 'bearer';
-      return new Promise((resolve, reject) => {
-        if (!API_KEY || API_KEY.includes('sk-xxxx')) {
-          const msg = '⚠️ 请在 [AI配置] 中填写有效的 API Key';
-          panel.log(msg);
-          reject(msg);
-          return;
+    // 截图直传路径：把截图压缩成模型可接受的 JPEG 图片负载
+    toImagePayload(canvas) {
+      const MAX_SIDE = 1568; // 限制最长边，避免 base64 请求体过大
+      let target = canvas;
+      const maxSide = Math.max(canvas.width, canvas.height);
+      if (maxSide > MAX_SIDE) {
+        const ratio = MAX_SIDE / maxSide;
+        const scaled = document.createElement('canvas');
+        scaled.width = Math.round(canvas.width * ratio);
+        scaled.height = Math.round(canvas.height * ratio);
+        scaled.getContext('2d').drawImage(canvas, 0, 0, scaled.width, scaled.height);
+        target = scaled;
+      }
+      const dataUrl = target.toDataURL('image/jpeg', 0.85);
+      return { base64: dataUrl.split(',')[1], mediaType: 'image/jpeg', dataUrl };
+    },
+    // 按模式准备题目输入：vision 返回图片负载，ocr 返回 OCR 文本；失败或过短返回 null
+    async prepareQuestion(element, mode = 'ocr') {
+      if (!element) return null;
+      if (mode === 'vision') {
+        try {
+          const canvas = await this.capture(element);
+          return this.toImagePayload(canvas);
+        } catch (err) {
+          console.error('Screenshot error:', err);
+          panel.log(`截图失败: ${err.message || '网络错误'}`);
+          return null;
         }
-        const maxChar = String.fromCharCode(65 + optionCount - 1);
-        const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
-        const prompt = `
+      }
+      const text = await this.recognize(element);
+      return (text && text.length > 5) ? text : null;
+    },
+    // OCR 文本路径提示词
+    buildTextPrompt(ocrText, optionCount) {
+      const maxChar = String.fromCharCode(65 + optionCount - 1);
+      const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
+      return `
 你是专业做题助手，请分析 OCR 文本，判断题型后给出答案。
 强约束：
 1) 本题只有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}
@@ -1131,7 +1181,48 @@
 题目内容：
 ${ocrText}
 `;
-        const systemPrompt = "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。";
+    },
+    // 截图直传路径提示词
+    buildVisionPrompt(optionCount) {
+      const maxChar = String.fromCharCode(65 + optionCount - 1);
+      const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
+      return `
+你是专业做题助手，请直接分析题目截图，判断题型后给出答案。
+强约束：
+1) 本题只有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}
+2) 以截图中选项出现顺序为准，映射 A/B/C/D...
+3) 输出格式必须包含“正确答案：”前缀，例如 正确答案：A 或 正确答案：ABD 或 正确答案：对/错
+`;
+    },
+    async askAI(question, optionCount = 0) {
+      const saved = Store.getAIConf();
+      const API_URL = saved.url;
+      const API_KEY = saved.key;
+      const MODEL_NAME = saved.model;
+      const API_FORMAT = saved.apiFormat || 'openai';
+      const AUTH_METHOD = saved.authMethod || 'bearer';
+      // question 为对象时走截图直传（多模态），为字符串时走 OCR 文本，两条路径并列
+      const isImage = !!question && typeof question === 'object';
+      return new Promise((resolve, reject) => {
+        if (!API_KEY || API_KEY.includes('sk-xxxx')) {
+          const msg = '⚠️ 请在 [AI配置] 中填写有效的 API Key';
+          panel.log(msg);
+          reject(msg);
+          return;
+        }
+        const prompt = isImage ? this.buildVisionPrompt(optionCount) : this.buildTextPrompt(question, optionCount);
+        const systemPrompt = isImage
+          ? "你是一个只输出答案的助手。请根据题目截图作答，判断题输出'对'或'错'，选择题输出字母。"
+          : "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。";
+        // 图片路径用多模态 content 数组承载截图，文本路径保持纯文本
+        const userContent = isImage
+          ? [
+            { type: 'text', text: prompt },
+            API_FORMAT === 'anthropic'
+              ? { type: 'image', source: { type: 'base64', media_type: question.mediaType, data: question.base64 } }
+              : { type: 'image_url', image_url: { url: question.dataUrl } }
+          ]
+          : prompt;
 
         // 构建认证 header
         const authHeader = AUTH_METHOD === 'x-api-key'
@@ -1153,7 +1244,7 @@ ${ocrText}
             max_tokens: 1024,
             system: systemPrompt,
             messages: [
-              { role: 'user', content: prompt }
+              { role: 'user', content: userContent }
             ]
           };
           // 调试日志
@@ -1166,14 +1257,6 @@ ${ocrText}
             url: API_URL,
             headers,
             data: JSON.stringify(requestBody),
-            data: JSON.stringify({
-              model: MODEL_NAME,
-              max_tokens: 1024,
-              system: systemPrompt,
-              messages: [
-                { role: 'user', content: prompt }
-              ]
-            }),
             timeout: 120000, // 120秒，思考模型需要更长响应时间
             onload: res => {
               console.log('[AI响应] Status:', res.status);
@@ -1209,7 +1292,7 @@ ${ocrText}
               model: MODEL_NAME,
               messages: [
                 { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
+                { role: 'user', content: userContent }
               ],
               temperature: 0.1
             }),
@@ -1633,7 +1716,8 @@ ${ocrText}
         this.updateProgress(this.outside, idx);
         return idx;
       }
-      this.panel.log('进入作业，启动 OCR + AI');
+      const mode = Solver.resolveAnswerMode();
+      this.panel.log(mode === 'vision' ? '进入作业，启动 截图直传 + AI' : '进入作业，启动 OCR + AI');
       item.click();
       await Utils.sleep(1500);
       let i = 0;
@@ -1660,8 +1744,8 @@ ${ocrText}
           targetEl?.querySelector('.list-unstyled.list-unstyled-radio') ||
           targetEl?.querySelector('ul.list');
         if (listContainer) optionCount = listContainer.querySelectorAll('li').length;
-        const ocrResult = await Solver.recognize(targetEl);
-        if (ocrResult && ocrResult.length > 5) {
+        const questionInput = await Solver.prepareQuestion(targetEl, mode);
+        if (questionInput) {
           let retryCount = 0;
           let success = false;
           while (retryCount < maxRetry && !success) {
@@ -1670,7 +1754,7 @@ ${ocrText}
                 this.panel.log(`🔄 第 ${i + 1} 题重试 ${retryCount}/${maxRetry}...`);
               }
               panel.log('🤖 请求 AI 获取答案...');
-              const aiText = await Solver.askAI(ocrResult, optionCount);
+              const aiText = await Solver.askAI(questionInput, optionCount);
               await Solver.autoSelectAndSubmit(aiText, targetEl);
               success = true;
             } catch (err) {
@@ -2115,9 +2199,10 @@ ${ocrText}
         return false;
       }
 
-      const ocrResult = await Solver.recognize(questionRoot);
-      if (!ocrResult || ocrResult.length <= 5) {
-        this.panel.log(`${label || '当前题目'} OCR 结果过短，跳过`);
+      const mode = Solver.resolveAnswerMode();
+      const questionInput = await Solver.prepareQuestion(questionRoot, mode);
+      if (!questionInput) {
+        this.panel.log(`${label || '当前题目'} ${mode === 'vision' ? '截图失败' : 'OCR 结果过短'}，跳过`);
         return false;
       }
 
@@ -2126,7 +2211,7 @@ ${ocrText}
         try {
           if (retryCount > 0) this.panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
           this.panel.log('🤖 请求 AI 获取答案...');
-          const aiText = await Solver.askAI(ocrResult, optionCount);
+          const aiText = await Solver.askAI(questionInput, optionCount);
           await Solver.autoSelectAndSubmit(aiText, questionRoot);
           await Utils.sleep(1200);
           return true;
