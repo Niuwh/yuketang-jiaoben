@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.1.0
+// @version      3.2.0
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.1.0',     // 版本号
+    version: '3.2.0',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -83,15 +83,6 @@
     isProgressDone(text) {
       if (!text) return false;
       return text.includes('100%') || text.includes('99%') || text.includes('98%') || text.includes('已完成');
-    },
-    // 主要是规避firefox会创建多个iframe的问题
-    inIframe() {
-      return window.top !== window.self;
-    },
-    // 下滑到最底部，触发课程加载
-    scrollToBottom(containerSelector) {
-      const el = document.querySelector(containerSelector);
-      if (el) el.scrollTop = el.scrollHeight;
     },
     getCurrentClassroomId() {
       const query = new URLSearchParams(location.search);
@@ -286,13 +277,6 @@
     clearPendingAutoStart() {
       localStorage.removeItem(Config.storageKeys.pendingAutoStart);
     },
-    isUserStopped() {
-      return localStorage.getItem(Config.storageKeys.userStopped) === '1';
-    },
-    setUserStopped(on) {
-      if (on) localStorage.setItem(Config.storageKeys.userStopped, '1');
-      else localStorage.removeItem(Config.storageKeys.userStopped);
-    },
   };
 
   // ---- 刷课会话状态 ----
@@ -300,13 +284,13 @@
   // 只有再次点击“开始刷课”才会清除该状态。每次读取持久化值，保证多标签页之间状态一致。
   const Session = {
     isStopped() {
-      return Store.isUserStopped();
+      return localStorage.getItem(Config.storageKeys.userStopped) === '1';
     },
     begin() {
-      Store.setUserStopped(false);
+      localStorage.removeItem(Config.storageKeys.userStopped);
     },
     stop() {
-      Store.setUserStopped(true);
+      localStorage.setItem(Config.storageKeys.userStopped, '1');
     }
   };
 
@@ -957,8 +941,9 @@
     // 用 Map 而非 WeakMap：卸载时需要枚举全部已包装元素以还原（记录体积很小，可忽略持有开销）
     installedMedia: new Map(),
 
-    // 幂等安装：同一元素重复调用不叠加包装
-    installElement(media) {
+    // 幂等安装：同一元素重复调用不叠加包装；必须先于首次设速调用（设速后限速器就开始回写）
+    ensure(media) {
+      media = media || document.querySelector('video') || document.querySelector('audio');
       if (!media || !Store.getRateConf().ratechangeBlockEnabled) return false;
       if (this.installedMedia.has(media)) return true;
       const ownDesc = Object.getOwnPropertyDescriptor(media, 'playbackRate');
@@ -1003,11 +988,6 @@
         if (navigator.userActivation) return navigator.userActivation.isActive === true;
       } catch (_) { /* 忽略环境差异 */ }
       return false;
-    },
-
-    // 必须先于首次设置倍速调用：设速后限速器就会开始回写
-    ensure(media) {
-      return this.installElement(media || document.querySelector('video'));
     },
 
     // 明确的清理/还原入口：恢复全部被包装的元素（面板保存后按新开关重新安装）
@@ -1141,19 +1121,25 @@
       const currentTime = Number(media.currentTime || 0);
       return Number.isFinite(duration) && duration > 1 && currentTime > 0 && duration - currentTime <= threshold;
     },
-    applySpeed(media) {
+    // 接管媒体并设速：autoplay 为 true 时先启动播放并静音（音频/内嵌视频路径）
+    applySpeed(media, autoplay = false) {
       if (Session.isStopped()) return;
       const conf = Store.getRateConf();
+      const target = media || document.querySelector('video') || document.querySelector('audio');
+      if (!target) return;
+      // 倍速回写拦截必须先于首次设速安装：设速后限速器就会开始回写
+      RateUnlock.ensure(target);
+      // 记录原值，停止刷课时还原
+      PageRestore.snapshotMedia(target);
+      if (autoplay) {
+        target.play();
+        target.volume = 0;
+      }
       const rate = conf.targetRate;
-      // 解锁包装必须先于首次设置倍速安装：设速触发的 ratechange 正是限速监听写回 1 的时机
-      RateUnlock.ensure(media);
-      const video = media && media.tagName?.toLowerCase() === 'video' ? media : document.querySelector('video');
+      const rateText = Number(rate).toFixed(2);
       const speedBtn = document.querySelector('xt-speedlist xt-button') || document.getElementsByTagName('xt-speedlist')[0]?.firstElementChild?.firstElementChild;
       const speedWrap = document.getElementsByTagName('xt-speedbutton')[0];
-      const rateText = Number(rate).toFixed(2);
-      if (conf.buttonSetEnabled && speedBtn && speedWrap) {
-        // 记录原值，停止刷课时还原
-        PageRestore.snapshotMedia(video);
+      if (conf.buttonSetEnabled && speedBtn && speedWrap && target.tagName.toLowerCase() === 'video') {
         PageRestore.snapshotNode(speedBtn, ['data-speed', 'keyt']);
         speedBtn.setAttribute('data-speed', rate);
         speedBtn.setAttribute('keyt', rateText);
@@ -1162,9 +1148,8 @@
         mousemove.initMouseEvent('mousemove', true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
         speedWrap.dispatchEvent(mousemove);
         speedBtn.click();
-      } else if (conf.directSetEnabled && video) {
-        PageRestore.snapshotMedia(video);
-        video.playbackRate = rate;
+      } else if (conf.directSetEnabled) {
+        target.playbackRate = rate;
       }
     },
     mute() {
@@ -1176,17 +1161,6 @@
         PageRestore.snapshotMedia(video);
         video.volume = 0;
       }
-    },
-    applyMediaDefault(media) {
-      if (!media || Session.isStopped()) return;
-      // 解锁包装必须先于首次设置倍速安装
-      RateUnlock.ensure(media);
-      // 记录原值，停止刷课时还原
-      PageRestore.snapshotMedia(media);
-      media.play();
-      media.volume = 0;
-      const conf = Store.getRateConf();
-      if (conf.directSetEnabled) media.playbackRate = conf.targetRate;
     },
     // 暂停拦截：刷课期间把 pause 替换为空方法，而非“检测到暂停再自动播放”（后者会与页面暂停互相打架）
     // 停止刷课/视频结束/临近结尾/任务完成时放行真实暂停
@@ -1260,16 +1234,13 @@
         nodeId: query.get('node_id') || ''
       };
     },
-    getMediaCandidates() {
-      return [...document.querySelectorAll('video, audio')].filter(media => {
+    getMedia() {
+      // 选取可见的 video 或任意 audio 作为接管目标
+      const candidates = [...document.querySelectorAll('video, audio')].filter(media => {
         if (!(media instanceof HTMLMediaElement)) return false;
         const rect = media.getBoundingClientRect();
-        const isVisible = rect.width > 0 && rect.height > 0;
-        return isVisible || media.tagName.toLowerCase() === 'audio';
+        return (rect.width > 0 && rect.height > 0) || media.tagName.toLowerCase() === 'audio';
       });
-    },
-    getMedia() {
-      const candidates = this.getMediaCandidates();
       if (!candidates.length) return document.querySelector('video') || document.querySelector('audio');
       const score = media => {
         const rect = media.getBoundingClientRect();
@@ -1330,14 +1301,15 @@
     getActiveLeafTitle() {
       return document.querySelector('.leaf-item.is-active')?.innerText?.replace(/\s+/g, ' ').trim() || '';
     },
-    getExerciseDocument() {
-      const localHasExercise = document.querySelector('#app .container-body .container-problem')
-        || document.querySelector('#app .container-problem')
-        || document.querySelector('.container-problem');
-      if (localHasExercise) return document;
-
-      const frames = [...document.querySelectorAll('iframe')];
-      for (const frame of frames) {
+    // 定位作业容器：先查本页，找不到再查同源 iframe
+    getExerciseContainer() {
+      const findIn = doc => doc.querySelector('#app .container-body .container-problem')
+        || doc.querySelector('#app .container-problem')
+        || doc.querySelector('.container-problem')
+        || null;
+      const local = findIn(document);
+      if (local) return local;
+      for (const frame of document.querySelectorAll('iframe')) {
         try {
           const doc = frame.contentDocument;
           if (!doc?.body) continue;
@@ -1346,20 +1318,13 @@
             || doc.querySelector('.subject-item')
             || doc.querySelector('.item-body')
           ) {
-            return doc;
+            return findIn(doc);
           }
         } catch (_) {
-          // ignore cross-document access failures
+          // 跨域 iframe 无法访问，跳过
         }
       }
       return null;
-    },
-    getExerciseContainer() {
-      const exerciseDoc = this.getExerciseDocument();
-      return exerciseDoc?.querySelector('#app .container-body .container-problem')
-        || exerciseDoc?.querySelector('#app .container-problem')
-        || exerciseDoc?.querySelector('.container-problem')
-        || null;
     },
     getExerciseQuestionTabs(root = this.getExerciseContainer()) {
       if (!root) return [];
@@ -1429,11 +1394,6 @@
         ...document.querySelectorAll(selectors)
       ];
       return nodes.find(el => this.isVisibleElement(el) && pattern.test(this.normalizeText(el.innerText)));
-    },
-    getAllScourse() { // 获得ai-workspace的课程列表
-      const list = document?.querySelectorAll(".nav-item-leaf-box")
-      if (!list) panel.warn("没有发现课程资源")
-      return list
     }
   };
 
@@ -1771,7 +1731,7 @@ ${ocrText}
   // ---- 流程开关：自动切换下一个任务点/切换界面 ----
   // 关闭后当前任务点完成（或失败）时不再点击下一个任务点、不再跳转其它页面，
   // 提示后停在原地并清除跨页自动续跑标记，避免切换页面后抓取失败的连环报错
-  function haltIfNoAutoSwitch(panel, context) {
+  function haltIfNoAutoSwitch(context) {
     if (Store.getFlowConf().autoSwitch) return false;
     panel.log(`${context}：已关闭“自动切换任务点/界面”，停留当前页面；请手动切换后点击[开始刷课]继续`);
     Store.clearPendingAutoStart();
@@ -1781,8 +1741,7 @@ ${ocrText}
 
   // ---- v2 逻辑 ----
   class V2Runner {
-    constructor(panel) {
-      this.panel = panel;
+    constructor() {
       this.baseUrl = location.href;
       const { current } = Store.getProgress(this.baseUrl);
       this.outside = current.outside;
@@ -1800,7 +1759,7 @@ ${ocrText}
       await Utils.sleep(timeout);
       if (document.visibilityState === 'hidden' || !document.hasFocus()) {
         this.shouldStop = true;
-        this.panel.log('已交给新页面继续，返回目录页后会自动续跑');
+        panel.log('已交给新页面继续，返回目录页后会自动续跑');
         return true;
       }
       return false;
@@ -1833,15 +1792,15 @@ ${ocrText}
     }
 
     async run() {
-      this.panel.log(`检测到已播放到第 ${this.outside} 集，继续刷课...`);
+      panel.log(`检测到已播放到第 ${this.outside} 集，继续刷课...`);
       // 在课件页恢复时直接续播当前内容，不重新走列表流程
       if (location.pathname.includes('/studentCards/')) {
         const videoBox = document.querySelector('.video-box');
         const boxText = videoBox?.innerText || '';
         if ((videoBox || document.querySelector('video')) && !boxText.includes('已完成')) {
-          this.panel.log('检测到当前课件页，直接续播当前内容');
+          panel.log('检测到当前课件页，直接续播当前内容');
           await this.waitCoursewareVideo();
-          if (haltIfNoAutoSwitch(this.panel, '当前课件内容播放完成')) return;
+          if (haltIfNoAutoSwitch('当前课件内容播放完成')) return;
           history.back();
           await Utils.sleep(1000);
         }
@@ -1855,26 +1814,26 @@ ${ocrText}
           const returnUrl = pending?.returnUrl
             || (pending?.classroomId ? `/v2/web/studentLog/${pending.classroomId}` : '');
           if (returnUrl && !location.pathname.includes('/studentLog/')) {
-            if (haltIfNoAutoSwitch(this.panel, '当前页面无课程列表')) return;
-            this.panel.log('当前页面无课程列表，返回目录页继续');
+            if (haltIfNoAutoSwitch('当前页面无课程列表')) return;
+            panel.log('当前页面无课程列表，返回目录页继续');
             location.href = returnUrl;
             return;
           }
-          this.panel.log('未找到课程列表，稍后重试');
+          panel.log('未找到课程列表，稍后重试');
           await Utils.sleep(2000);
           continue;
         }
         console.log(`当前集数:${this.outside}/全部集数${list.length}`);
         if (this.outside >= list.length) {
-          this.panel.log('课程刷完啦 🎉');
-          this.panel.resetStartButton('刷完啦~');
+          panel.log('课程刷完啦 🎉');
+          panel.resetStartButton('刷完啦~');
           Store.removeProgress(this.baseUrl);
           Store.clearPendingAutoStart();
           break;
         }
         const course = list[this.outside]?.querySelector('.content-box')?.querySelector('section');
         if (!course) {
-          this.panel.log('未找到当前课程节点，跳过');
+          panel.log('未找到当前课程节点，跳过');
           this.updateProgress(this.outside + 1, 0);
           continue;
         }
@@ -1889,12 +1848,12 @@ ${ocrText}
         let isCompleted = this.checkCompletionStatus(statusBox, statusText);
 
         if (isCompleted) {
-          this.panel.log(`✅ ${title} 已完成，跳过`);
+          panel.log(`✅ ${title} 已完成，跳过`);
           this.updateProgress(this.outside + 1, 0);
           continue;
         }
 
-        this.panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}，标题：${title}`);
+        panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}，标题：${title}`);
         if (type.includes('shipin')) {
           await this.handleVideo(course);
         } else if (type.includes('piliang')) {
@@ -1904,10 +1863,10 @@ ${ocrText}
         } else if (type.includes('kejian')) {
           await this.handleCourseware(course);
         } else if (type.includes('kaoshi')) {
-          this.panel.log('考试区域脚本会被屏蔽，已跳过');
+          panel.log('考试区域脚本会被屏蔽，已跳过');
           this.updateProgress(this.outside + 1, 0);
         } else {
-          this.panel.log('非视频/批量/课件/考试，已跳过');
+          panel.log('非视频/批量/课件/考试，已跳过');
           this.updateProgress(this.outside + 1, 0);
         }
         if (this.shouldStop || Session.isStopped()) return;
@@ -1917,7 +1876,9 @@ ${ocrText}
     async autoSlide() {
       const frequency = Math.floor((this.outside + 1) / 20) + 1;
       for (let i = 0; i < frequency; i++) {
-        Utils.scrollToBottom('.viewContainer');
+        // 下滑到最底部，触发课程加载
+        const container = document.querySelector('.viewContainer');
+        if (container) container.scrollTop = container.scrollHeight;
         await Utils.sleep(800);
       }
     }
@@ -1929,7 +1890,7 @@ ${ocrText}
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       const title = document.querySelector('.title')?.innerText || '视频';
       const isDeadline = document.querySelector('.box')?.innerText.includes('已过考核截止时间');
-      if (isDeadline) this.panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
+      if (isDeadline) panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
       Player.applySpeed();
       Player.mute();
       const stopObserve = Player.blockPause(document.querySelector('video'));
@@ -1940,7 +1901,7 @@ ${ocrText}
       stopObserve();
       if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
-      if (haltIfNoAutoSwitch(this.panel, '当前视频播放完成')) {
+      if (haltIfNoAutoSwitch('当前视频播放完成')) {
         this.shouldStop = true;
         return;
       }
@@ -1951,7 +1912,7 @@ ${ocrText}
     async handleBatch(course, list) {
       const expandBtn = course.querySelector('.sub-info')?.querySelector('.gray')?.querySelector('span');
       if (!expandBtn) {
-        this.panel.log('未找到批量展开按钮，跳过');
+        panel.log('未找到批量展开按钮，跳过');
         this.updateProgress(this.outside + 1, 0);
         return;
       }
@@ -1959,7 +1920,7 @@ ${ocrText}
       await Utils.sleep(1200);
       const activities = list[this.outside]?.querySelector('.leaf_list__wrap')?.querySelectorAll('.activity__wrap') || [];
       let idx = this.inside;
-      this.panel.log(`进入批量区，内部进度 ${idx}/${activities.length}`);
+      panel.log(`进入批量区，内部进度 ${idx}/${activities.length}`);
       while (idx < activities.length) {
         const item = activities[idx];
         if (!item) break;
@@ -1974,22 +1935,22 @@ ${ocrText}
         const isCompleted = this.checkCompletionStatus(statusBox, statusText);
 
         if (isCompleted) {
-          this.panel.log(`✅ ${title} 已完成，跳过`);
+          panel.log(`✅ ${title} 已完成，跳过`);
           idx++;
           this.updateProgress(this.outside, idx);
           continue;
         }
 
         if (tagText === '音频') {
-          idx = await this.playAudioItem(item, title, idx);
+          idx = await this.playMediaItem(item, title, idx, true);
         } else if (tagHref.includes('shipin')) {
-          idx = await this.playVideoItem(item, title, idx);
+          idx = await this.playMediaItem(item, title, idx);
         } else if (tagHref.includes('tuwen') || tagHref.includes('taolun')) {
           idx = await this.autoCommentItem(item, tagHref.includes('tuwen') ? '图文' : '讨论', idx);
         } else if (tagHref.includes('zuoye')) {
           idx = await this.handleHomework(item, idx);
         } else {
-          this.panel.log(`类型未知，已跳过：${title}`);
+          panel.log(`类型未知，已跳过：${title}`);
           idx++;
           this.updateProgress(this.outside, idx);
         }
@@ -1999,49 +1960,31 @@ ${ocrText}
       await Utils.sleep(1000);
     }
 
-    async playAudioItem(item, title, idx) {
-      this.panel.log(`开始播放音频：${title}`);
+    // 批量区媒体条目：打开并等待播放进度完成，audio 区分音频/视频的接管方式
+    async playMediaItem(item, title, idx, audio = false) {
+      panel.log(`开始播放${audio ? '音频' : '视频'}：${title}`);
       item.click();
       if (await this.waitForExternalHandoff()) return idx;
       await Utils.sleep(2500);
-      Player.applyMediaDefault(document.querySelector('audio'));
-      const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
-      await Utils.poll(() => {
-        Utils.dismissPopups();
-        return Utils.isProgressDone(progressNode?.innerHTML);
-      }, { interval: 3000, timeout: await Utils.getDDL() });
-      if (Session.isStopped()) return idx;
-      this.panel.log(`${title} 播放完成`);
-      idx++;
-      this.updateProgress(this.outside, idx);
-      if (haltIfNoAutoSwitch(this.panel, `${title} 播放完成`)) {
-        this.shouldStop = true;
-        return idx;
+      let stopPause = () => { };
+      if (audio) {
+        Player.applySpeed(document.querySelector('audio'), true);
+      } else {
+        Player.applySpeed();
+        Player.mute();
+        stopPause = Player.blockPause(document.querySelector('video'));
       }
-      history.back();
-      await Utils.sleep(1500);
-      return idx;
-    }
-
-    async playVideoItem(item, title, idx) {
-      this.panel.log(`开始播放视频：${title}`);
-      item.click();
-      if (await this.waitForExternalHandoff()) return idx;
-      await Utils.sleep(2500);
-      Player.applySpeed();
-      Player.mute();
-      const stopObserve = Player.blockPause(document.querySelector('video'));
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       await Utils.poll(() => {
         Utils.dismissPopups();
         return Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 3000, timeout: await Utils.getDDL() });
-      stopObserve();
+      stopPause();
       if (Session.isStopped()) return idx;
-      this.panel.log(`${title} 播放完成`);
+      panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
-      if (haltIfNoAutoSwitch(this.panel, `${title} 播放完成`)) {
+      if (haltIfNoAutoSwitch(`${title} 播放完成`)) {
         this.shouldStop = true;
         return idx;
       }
@@ -2051,17 +1994,17 @@ ${ocrText}
     }
 
     async autoCommentItem(item, typeText, idx) {
-      this.panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
+      panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
       item.click();
       await Utils.sleep(1200);
 
       // 检查是否开启自动评论功能
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoComment) {
-        this.panel.log(`${typeText}已查看，但未开启自动回复功能`);
+        panel.log(`${typeText}已查看，但未开启自动回复功能`);
         idx++;
         this.updateProgress(this.outside, idx);
-        if (haltIfNoAutoSwitch(this.panel, `${typeText}已查看`)) {
+        if (haltIfNoAutoSwitch(`${typeText}已查看`)) {
           this.shouldStop = true;
           return idx;
         }
@@ -2090,7 +2033,7 @@ ${ocrText}
         if (!firstComment) await Utils.sleep(500);
       }
       if (!firstComment) {
-        this.panel.log('未找到评论内容，跳过该项');
+        panel.log('未找到评论内容，跳过该项');
       } else {
         const input = document.querySelector('.el-textarea__inner');
         if (input) {
@@ -2103,17 +2046,17 @@ ${ocrText}
             document.querySelector('.el-button--primary');
           if (sendBtn && !sendBtn.disabled && !sendBtn.classList.contains('is-disabled')) {
             sendBtn.click();
-            this.panel.log(`已在${typeText}区发表评论`);
+            panel.log(`已在${typeText}区发表评论`);
           } else {
-            this.panel.log('发送按钮不可用或不存在');
+            panel.log('发送按钮不可用或不存在');
           }
         } else {
-          this.panel.log('未找到评论输入框，跳过');
+          panel.log('未找到评论输入框，跳过');
         }
       }
       idx++;
       this.updateProgress(this.outside, idx);
-      if (haltIfNoAutoSwitch(this.panel, `${typeText}已处理`)) {
+      if (haltIfNoAutoSwitch(`${typeText}已处理`)) {
         this.shouldStop = true;
         return idx;
       }
@@ -2125,13 +2068,13 @@ ${ocrText}
     async handleHomework(item, idx) {
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoAI) {
-        this.panel.log('已关闭AI自动答题，跳过该项');
+        panel.log('已关闭AI自动答题，跳过该项');
         idx++;
         this.updateProgress(this.outside, idx);
         return idx;
       }
       const mode = Solver.resolveAnswerMode();
-      this.panel.log(mode === 'vision' ? '进入作业，启动 截图直传 + AI' : '进入作业，启动 OCR + AI');
+      panel.log(mode === 'vision' ? '进入作业，启动 截图直传 + AI' : '进入作业，启动 OCR + AI');
       item.click();
       await Utils.sleep(1500);
       let i = 0;
@@ -2139,7 +2082,7 @@ ${ocrText}
       while (true) {
         const items = document.querySelectorAll('.subject-item.J_order');
         if (i >= items.length) {
-          this.panel.log(`所有题目处理完毕，共 ${items.length} 题，准备交卷`);
+          panel.log(`所有题目处理完毕，共 ${items.length} 题，准备交卷`);
           break;
         }
         const listItem = items[i];
@@ -2148,7 +2091,7 @@ ${ocrText}
         await Utils.sleep(1800);
         const disabled = document.querySelectorAll('.el-button.el-button--info.is-disabled.is-plain');
         if (disabled.length > 0) {
-          this.panel.log(`第 ${i + 1} 题已完成，跳过...`);
+          panel.log(`第 ${i + 1} 题已完成，跳过...`);
           i++;
           continue;
         }
@@ -2165,7 +2108,7 @@ ${ocrText}
           while (retryCount < maxRetry && !success) {
             try {
               if (retryCount > 0) {
-                this.panel.log(`🔄 第 ${i + 1} 题重试 ${retryCount}/${maxRetry}...`);
+                panel.log(`🔄 第 ${i + 1} 题重试 ${retryCount}/${maxRetry}...`);
               }
               panel.log('🤖 请求 AI 获取答案...');
               const aiText = await Solver.askAI(questionInput, optionCount);
@@ -2173,12 +2116,12 @@ ${ocrText}
               success = true;
             } catch (err) {
               retryCount++;
-              this.panel.log(`AI 答题失败：${err}`);
+              panel.log(`AI 答题失败：${err}`);
               if (retryCount < maxRetry) {
-                this.panel.log(`等待 5 秒后重试...`);
+                panel.log(`等待 5 秒后重试...`);
                 await Utils.sleep(5000);
               } else {
-                this.panel.log(`⚠️ 第 ${i + 1} 题重试 ${maxRetry} 次后仍失败，跳过`);
+                panel.log(`⚠️ 第 ${i + 1} 题重试 ${maxRetry} 次后仍失败，跳过`);
               }
             }
           }
@@ -2188,7 +2131,7 @@ ${ocrText}
       }
       idx++;
       this.updateProgress(this.outside, idx);
-      if (haltIfNoAutoSwitch(this.panel, '当前作业处理完成')) {
+      if (haltIfNoAutoSwitch('当前作业处理完成')) {
         this.shouldStop = true;
         return idx;
       }
@@ -2198,28 +2141,28 @@ ${ocrText}
     }
 
     async handleClassroom(course) {
-      this.panel.log('进入课堂模式...');
+      panel.log('进入课堂模式...');
       course.click();
       await Utils.sleep(5000);
       const iframe = document.querySelector('iframe.lesson-report-mobile');
       if (!iframe || !iframe.contentDocument) {
-        this.panel.log('未找到课堂 iframe，跳过');
+        panel.log('未找到课堂 iframe，跳过');
         this.updateProgress(this.outside + 1, 0);
         return;
       }
       const video = iframe.contentDocument.querySelector('video');
       const audio = iframe.contentDocument.querySelector('audio');
       if (video) {
-        Player.applyMediaDefault(video);
+        Player.applySpeed(video, true);
         await Player.waitForEnd(video);
       }
       if (!Session.isStopped() && audio) {
-        Player.applyMediaDefault(audio);
+        Player.applySpeed(audio, true);
         await Player.waitForEnd(audio);
       }
       if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
-      if (haltIfNoAutoSwitch(this.panel, '当前课堂内容播放完成')) {
+      if (haltIfNoAutoSwitch('当前课堂内容播放完成')) {
         this.shouldStop = true;
         return;
       }
@@ -2243,13 +2186,13 @@ ${ocrText}
             // 播放器被关闭或视频元素被销毁，重新打开视频框
             const videoBox = document.querySelector('.video-box');
             if (videoBox && !videoBox.innerText.includes('已完成')) {
-              this.panel.log('播放器被关闭，正在重新打开');
+              panel.log('播放器被关闭，正在重新打开');
               videoBox.click();
               boundVideo = null;
             }
             reopenAttempts++;
             if (reopenAttempts >= 4) {
-              this.panel.log('播放器恢复失败，刷新页面重试');
+              panel.log('播放器恢复失败，刷新页面重试');
               location.reload();
               return false;
             }
@@ -2284,7 +2227,7 @@ ${ocrText}
       const tableData = course.parentNode?.parentNode?.parentNode?.__vue__?.tableData;
       const deadlinePassed = (tableData?.deadline || tableData?.end) ? (tableData.deadline < Date.now() || tableData.end < Date.now()) : false;
       if (deadlinePassed) {
-        this.panel.log(`${course.querySelector('h2')?.innerText || '课件'} 已结课，跳过`);
+        panel.log(`${course.querySelector('h2')?.innerText || '课件'} 已结课，跳过`);
         this.updateProgress(this.outside + 1, 0);
         return;
       }
@@ -2294,7 +2237,7 @@ ${ocrText}
       // 检测"查看课件"按钮（课件概况页专用）
       const checkBtn = document.querySelector('.ppt_img_box .check') || document.querySelector('p.check');
       if (checkBtn && checkBtn.innerText?.trim() === '查看课件') {
-        this.panel.log('检测到"查看课件"按钮，正在点击...');
+        panel.log('检测到"查看课件"按钮，正在点击...');
         checkBtn.click();
         await Utils.sleep(2000);
       }
@@ -2302,21 +2245,21 @@ ${ocrText}
       const className = document.querySelector('.dialog-header')?.firstElementChild?.innerText || '课件';
       if (classType.includes('PPT')) {
         const slides = document.querySelector('.swiper-wrapper')?.children || [];
-        this.panel.log(`开始播放 PPT：${className}`);
+        panel.log(`开始播放 PPT：${className}`);
         for (let i = 0; i < slides.length; i++) {
           if (Session.isStopped()) return;
           slides[i].click();
-          this.panel.log(`${className}：第 ${i + 1} 张`);
+          panel.log(`${className}：第 ${i + 1} 张`);
           await Utils.sleep(Config.pptInterval);
         }
         await Utils.sleep(Config.pptInterval);
         const videoBoxes = document.querySelectorAll('.video-box');
         if (videoBoxes?.length) {
-          this.panel.log('PPT 中有视频，继续播放');
+          panel.log('PPT 中有视频，继续播放');
           for (let i = 0; i < videoBoxes.length; i++) {
             if (Session.isStopped()) return;
             if (videoBoxes[i].innerText === '已完成') {
-              this.panel.log(`第 ${i + 1} 个视频已完成，跳过`);
+              panel.log(`第 ${i + 1} 个视频已完成，跳过`);
               continue;
             }
             videoBoxes[i].click();
@@ -2324,19 +2267,19 @@ ${ocrText}
             await this.waitCoursewareVideo();
           }
         }
-        this.panel.log(`${className} 已播放完毕`);
+        panel.log(`${className} 已播放完毕`);
       } else {
         const videoBox = document.querySelector('.video-box');
         if (videoBox) {
           videoBox.click();
           await Utils.sleep(1800);
           await this.waitCoursewareVideo();
-          this.panel.log(`${className} 视频播放完毕`);
+          panel.log(`${className} 视频播放完毕`);
         }
       }
       if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
-      if (haltIfNoAutoSwitch(this.panel, '当前课件播放完成')) {
+      if (haltIfNoAutoSwitch('当前课件播放完成')) {
         this.shouldStop = true;
         return;
       }
@@ -2347,17 +2290,14 @@ ${ocrText}
 
   // ---- pro/lms 旧版（仅做转发） ----
   class ProOldRunner {
-    constructor(panel) {
-      this.panel = panel;
-    }
     run() {
-      this.panel.log('准备打开新标签页...');
+      panel.log('准备打开新标签页...');
       const leafDetail = document.querySelectorAll('.leaf-detail');
       let classCount = Store.getProClassCount() - 1;
       while (leafDetail[classCount] && !leafDetail[classCount].firstChild.querySelector('i').className.includes('shipin')) {
         classCount++;
         Store.setProClassCount(classCount + 1);
-        this.panel.log('课程不属于视频，已跳过');
+        panel.log('课程不属于视频，已跳过');
       }
       leafDetail[classCount]?.click();
     }
@@ -2365,26 +2305,23 @@ ${ocrText}
 
   // ---- pro/lms 新版（主要逻辑） ----
   class ProNewRunner {
-    constructor(panel) {
-      this.panel = panel;
-    }
     async run() {
       preventScreenCheck();
       let classCount = Store.getProClassCount();
       while (!Session.isStopped()) {
-        this.panel.log(`准备播放第 ${classCount} 集...`);
+        panel.log(`准备播放第 ${classCount} 集...`);
         await Utils.sleep(2000);
         const className = document.querySelector('.header-bar')?.firstElementChild?.innerText || '';
         const classType = document.querySelector('.header-bar')?.firstElementChild?.firstElementChild?.getAttribute('class') || '';
         const classStatus = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
         if (classType.includes('tuwen') && !classStatus.includes('已读')) {
-          this.panel.log(`正在阅读：${className}`);
+          panel.log(`正在阅读：${className}`);
           await Utils.sleep(2000);
         } else if (classType.includes('taolun')) {
-          this.panel.log(`讨论区暂不自动发帖，${className}`);
+          panel.log(`讨论区暂不自动发帖，${className}`);
           await Utils.sleep(2000);
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
-          this.panel.log(`2s 后开始播放：${className}`);
+          panel.log(`2s 后开始播放：${className}`);
           await Utils.sleep(2000);
           let statusTimer;
           let videoTimer;
@@ -2392,7 +2329,7 @@ ${ocrText}
             statusTimer = setInterval(() => {
               const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
               if (status.includes('100%') || status.includes('99%') || status.includes('98%') || status.includes('已完成')) {
-                this.panel.log(`${className} 播放完毕`);
+                panel.log(`${className} 播放完毕`);
                 clearInterval(statusTimer);
                 statusTimer = null;
               }
@@ -2426,25 +2363,25 @@ ${ocrText}
             if (videoTimer) clearInterval(videoTimer);
           }
         } else if (classType.includes('zuoye')) {
-          this.panel.log(`进入作业：${className}（暂无自动答题）`);
+          panel.log(`进入作业：${className}（暂无自动答题）`);
           await Utils.sleep(2000);
         } else if (classType.includes('kaoshi')) {
-          this.panel.log(`进入考试：${className}（不会自动答题）`);
+          panel.log(`进入考试：${className}（不会自动答题）`);
           await Utils.sleep(2000);
         } else if (classType.includes('ketang')) {
-          this.panel.log(`进入课堂：${className}（暂无自动功能）`);
+          panel.log(`进入课堂：${className}（暂无自动功能）`);
           await Utils.sleep(2000);
         } else {
-          this.panel.log(`已看过：${className}`);
+          panel.log(`已看过：${className}`);
           await Utils.sleep(2000);
         }
         if (Session.isStopped()) return;
-        this.panel.log(`第 ${classCount} 集播放完毕`);
+        panel.log(`第 ${classCount} 集播放完毕`);
         classCount++;
         Store.setProClassCount(classCount);
         const nextBtn = document.querySelector('.btn-next');
         if (nextBtn) {
-          if (haltIfNoAutoSwitch(this.panel, `第 ${classCount - 1} 集播放完毕`)) break;
+          if (haltIfNoAutoSwitch(`第 ${classCount - 1} 集播放完毕`)) break;
           const event1 = new Event('mousemove', { bubbles: true });
           event1.clientX = 9999;
           event1.clientY = 9999;
@@ -2452,9 +2389,9 @@ ${ocrText}
           nextBtn.dispatchEvent(new Event('click'));
         } else {
           localStorage.removeItem(Config.storageKeys.proClassCount);
-          this.panel.log('课程播放完毕 🎉');
+          panel.log('课程播放完毕 🎉');
           Store.clearPendingAutoStart();
-          this.panel.resetStartButton('开始刷课');
+          panel.resetStartButton('开始刷课');
           break;
         }
       }
@@ -2463,15 +2400,6 @@ ${ocrText}
 
   // ---- ai-workspace 新版学习空间 ----
   class AiWorkspaceRunner {
-    constructor(panel) {
-      this.panel = panel;
-    }
-
-    getExerciseQuestionLabel(root) {
-      const tabs = AiWorkspace.getExerciseQuestionTabs(root);
-      const active = tabs.find(tab => /active|current|selected|is-active/.test(tab.className));
-      return AiWorkspace.normalizeText(active?.innerText || '');
-    }
 
     // 获取要跳转回去的目标地址
     getReturnUrl() {
@@ -2492,29 +2420,23 @@ ${ocrText}
         await this.returnToSource(returnUrl)
       } else {
         // 2. 直接从ai - workspac页面进入（开始刷课）的
-        this.panel.log("检测到是从ai - workspac页面点击开始刷课");
-        this.source = AiWorkspace.getAllScourse(); // 得到课程列表
+        panel.log("检测到是从ai - workspac页面点击开始刷课");
+        this.source = document.querySelectorAll('.nav-item-leaf-box'); // ai-workspace 课程列表
         this.activateIndex = Array.from(this.source).findIndex(el => el.firstChild.classList.contains("is-active")) // 现在正在刷第几个（从0开始）
         await this.handleNext(this.activateIndex + 1)
       }
     }
 
-    // 获取父窗口对象 window.opener
-    getSourceWindow() {
-      try {
-        if (!window.opener || window.opener.closed) return null;
-        if (window.opener.location.origin !== location.origin) return null;
-        return window.opener;
-      } catch (_) {
-        return null;
-      }
-    }
-
     async returnToSource(returnUrl) {
-      this.panel.log('媒体播放完成，返回课程目录页继续匹配');
+      panel.log('媒体播放完成，返回课程目录页继续匹配');
       await Utils.sleep(1200);
-      const sourceWindow = this.getSourceWindow();
-      console.log(sourceWindow);
+      // 取回打开本页的课程目录窗口（跨域 opener 不可用）
+      let sourceWindow = null;
+      try {
+        if (window.opener && !window.opener.closed && window.opener.location.origin === location.origin) {
+          sourceWindow = window.opener;
+        }
+      } catch (_) { }
       if (sourceWindow) {
         try {
           sourceWindow.location.href = returnUrl;
@@ -2535,12 +2457,12 @@ ${ocrText}
 
     async handleMedia(route) {
       const title = AiWorkspace.getActiveLeafTitle() || `${route.type} ${route.leafId}`;
-      this.panel.log(`开始播放：${title}`);
+      panel.log(`开始播放：${title}`);
       const ready = await Utils.poll(() => Boolean(AiWorkspace.getMedia()), { interval: 500, timeout: 20000 });
       if (Session.isStopped()) return false;
       let media = AiWorkspace.getMedia();
       if (!ready || !media) {
-        this.panel.log('未找到视频/音频元素，停止当前轮次');
+        panel.log('未找到视频/音频元素，停止当前轮次');
         return false;
       }
 
@@ -2552,11 +2474,11 @@ ${ocrText}
         Player.mute();
         stopObserve = Player.blockPause(media, shouldResume);
       } else {
-        Player.applyMediaDefault(media);
+        Player.applySpeed(media, true);
       }
       const stopKeepAlive = AiWorkspace.keepAlive(shouldResume);
       const rateConf = Store.getRateConf();
-      this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${rateConf.targetRate}x，静音开启；按钮设速:${rateConf.buttonSetEnabled ? '开' : '关'} 直设倍速:${rateConf.directSetEnabled ? '开' : '关'} 倍速保活:${rateConf.keepAliveEnabled ? '开' : '关'} 回写拦截:${rateConf.ratechangeBlockEnabled ? '开' : '关'}`);
+      panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${rateConf.targetRate}x，静音开启；按钮设速:${rateConf.buttonSetEnabled ? '开' : '关'} 直设倍速:${rateConf.directSetEnabled ? '开' : '关'} 倍速保活:${rateConf.keepAliveEnabled ? '开' : '关'} 回写拦截:${rateConf.ratechangeBlockEnabled ? '开' : '关'}`);
       try {
         let startTime = Number(media.currentTime || 0);
         const started = await Utils.poll(() => {
@@ -2567,7 +2489,7 @@ ${ocrText}
           return currentTime > startTime + 0.5 || (!media.paused && media.readyState >= 2 && currentTime > startTime + 0.2);
         }, { interval: 500, timeout: 15000 });
         if (!started) {
-          if (!Session.isStopped()) this.panel.log('未确认到视频实际开始播放，停止当前轮次');
+          if (!Session.isStopped()) panel.log('未确认到视频实际开始播放，停止当前轮次');
           return false;
         }
         startTime = Number(media.currentTime || 0);
@@ -2597,7 +2519,7 @@ ${ocrText}
         media.removeEventListener('ended', onEnded);
         playbackState.completed = true;
         if (!done) {
-          if (!Session.isStopped()) this.panel.log('等待播放完成超时，停止当前轮次');
+          if (!Session.isStopped()) panel.log('等待播放完成超时，停止当前轮次');
           return false;
         }
       } finally {
@@ -2605,18 +2527,18 @@ ${ocrText}
         stopKeepAlive();
       }
 
-      this.panel.log(`${title} 播放完成`);
+      panel.log(`${title} 播放完成`);
       return true;
     }
 
     async solveExerciseQuestion(root, label = '') {
       const questionRoot = AiWorkspace.getExerciseQuestionBody(root);
       if (!questionRoot) {
-        this.panel.log('未找到题目容器，停止当前轮次');
+        panel.log('未找到题目容器，停止当前轮次');
         return false;
       }
       if (AiWorkspace.isExerciseAnswered(questionRoot)) {
-        this.panel.log(`${label || '当前题目'} 已完成，跳过`);
+        panel.log(`${label || '当前题目'} 已完成，跳过`);
         return true;
       }
 
@@ -2632,28 +2554,28 @@ ${ocrText}
         ? listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]').length
         : 0;
       if (!optionCount) {
-        this.panel.log(`${label || '当前题目'} 未找到选项，跳过`);
+        panel.log(`${label || '当前题目'} 未找到选项，跳过`);
         return false;
       }
 
       const mode = Solver.resolveAnswerMode();
       const questionInput = await Solver.prepareQuestion(questionRoot, mode);
       if (!questionInput) {
-        this.panel.log(`${label || '当前题目'} ${mode === 'vision' ? '截图失败' : 'OCR 结果过短'}，跳过`);
+        panel.log(`${label || '当前题目'} ${mode === 'vision' ? '截图失败' : 'OCR 结果过短'}，跳过`);
         return false;
       }
 
       const maxRetry = 3;
       for (let retryCount = 0; retryCount < maxRetry; retryCount++) {
         try {
-          if (retryCount > 0) this.panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
-          this.panel.log('🤖 请求 AI 获取答案...');
+          if (retryCount > 0) panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
+          panel.log('🤖 请求 AI 获取答案...');
           const aiText = await Solver.askAI(questionInput, optionCount);
           await Solver.autoSelectAndSubmit(aiText, questionRoot);
           await Utils.sleep(1200);
           return true;
         } catch (err) {
-          this.panel.log(`AI 答题失败：${err}`);
+          panel.log(`AI 答题失败：${err}`);
           if (retryCount < maxRetry - 1) await Utils.sleep(5000);
         }
       }
@@ -2676,7 +2598,7 @@ ${ocrText}
     async handleExercise(route) {
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoAI) {
-        this.panel.log('已关闭 AI 自动答题，作业将直接跳过');
+        panel.log('已关闭 AI 自动答题，作业将直接跳过');
         return true;
       }
 
@@ -2684,14 +2606,14 @@ ${ocrText}
       if (Session.isStopped()) return true;
       const root = AiWorkspace.getExerciseContainer();
       if (!ready || !root) {
-        this.panel.log('未找到作业容器，停止当前轮次');
+        panel.log('未找到作业容器，停止当前轮次');
         return false;
       }
 
-      this.panel.log(`开始处理作业：${AiWorkspace.getActiveLeafTitle() || route.leafId}`);
+      panel.log(`开始处理作业：${AiWorkspace.getActiveLeafTitle() || route.leafId}`);
       const tabs = AiWorkspace.getExerciseQuestionTabs(root);
       if (tabs.length) {
-        this.panel.log(`检测到题目索引 ${tabs.length} 个，按题号顺序作答`);
+        panel.log(`检测到题目索引 ${tabs.length} 个，按题号顺序作答`);
         for (let i = 0; i < tabs.length; i++) {
           if (Session.isStopped()) return true;
           const currentRoot = AiWorkspace.getExerciseContainer() || root;
@@ -2705,7 +2627,7 @@ ${ocrText}
         return true;
       }
 
-      this.panel.log('未找到题号列表，尝试只处理当前题并按下一题推进');
+      panel.log('未找到题号列表，尝试只处理当前题并按下一题推进');
       let previousFingerprint = '';
       for (let i = 0; i < 20; i++) {
         if (Session.isStopped()) return true;
@@ -2714,7 +2636,8 @@ ${ocrText}
         const fingerprint = AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
         if (!fingerprint) break;
         if (i > 0 && fingerprint === previousFingerprint) break;
-        await this.solveExerciseQuestion(currentRoot, this.getExerciseQuestionLabel(currentRoot) || `第 ${i + 1} 题`);
+        const activeTab = AiWorkspace.getExerciseQuestionTabs(currentRoot).find(tab => /active|current|selected|is-active/.test(tab.className));
+        await this.solveExerciseQuestion(currentRoot, AiWorkspace.normalizeText(activeTab?.innerText || '') || `第 ${i + 1} 题`);
         previousFingerprint = fingerprint;
         const moved = await this.advanceExerciseQuestion(currentRoot, fingerprint);
         if (!moved) break;
@@ -2726,8 +2649,8 @@ ${ocrText}
     async handleNext(count) {
       if (Session.isStopped()) return;
       if (count >= this.source.length) {
-        this.panel.log('课程刷完啦 🎉');
-        this.panel.resetStartButton('刷完啦~');
+        panel.log('课程刷完啦 🎉');
+        panel.resetStartButton('刷完啦~');
         Store.clearPendingAutoStart();
         return;
       }
@@ -2741,11 +2664,11 @@ ${ocrText}
       if (preventScreenCheckSwitch) preventScreenCheck();
       const route = AiWorkspace.getRoute();
       if (!route) {
-        this.panel.log('当前页面已离开 ai-workspace/lms-graph');
+        panel.log('当前页面已离开 ai-workspace/lms-graph');
         return;
       }
       if (!route.leafId) {
-        this.panel.log('未能识别当前知识点');
+        panel.log('未能识别当前知识点');
         return;
       }
       let ok = false;
@@ -2754,14 +2677,14 @@ ${ocrText}
       } else if (route.type === 'exercise') {
         ok = await this.handleExercise(route);
       } else {
-        this.panel.log(`当前类型为 ${route.type}，当前暂不自动处理此类型，自动跳过`);
+        panel.log(`当前类型为 ${route.type}，当前暂不自动处理此类型，自动跳过`);
         await Utils.sleep(2000);
         ok = true;
       }
       if (Session.isStopped()) return;
-      if (!ok) this.panel.warn(Store.getFlowConf().autoSwitch ? '(该视频可能已经刷完了)，即将跳过开始下一个' : '(该视频可能已经刷完了)');
+      if (!ok) panel.warn(Store.getFlowConf().autoSwitch ? '(该视频可能已经刷完了)，即将跳过开始下一个' : '(该视频可能已经刷完了)');
       // 继续下一个任务点/界面；关闭自动切换时停留当前页面，避免切换后抓取失败
-      if (haltIfNoAutoSwitch(this.panel, ok ? '当前任务点处理完成' : '当前任务点处理结束')) return;
+      if (haltIfNoAutoSwitch(ok ? '当前任务点处理完成' : '当前任务点处理结束')) return;
       await this.autoSelect()
     }
   }
@@ -2789,7 +2712,7 @@ ${ocrText}
     const aiRoute = AiWorkspace.getRoute();
     if (aiRoute) {
       panel.log(`正在匹配处理逻辑：ai-workspace/lms-graph/${aiRoute.type}`);
-      new AiWorkspaceRunner(panel).run();
+      new AiWorkspaceRunner().run();
       return;
     }
     // ---- ai-workspace end
@@ -2798,12 +2721,12 @@ ${ocrText}
     const matchURL = `${url}${path[0]}/${path[1]}/${path[2]}`;
     panel.log(`正在匹配处理逻辑：${matchURL}`);
     if (matchURL.includes('yuketang.cn/v2/web') || matchURL.includes('gdufemooc.cn/v2/web')) {
-      new V2Runner(panel).run();
+      new V2Runner().run();
     } else if (matchURL.includes('yuketang.cn/pro/lms') || matchURL.includes('gdufemooc.cn/pro/lms')) {
       if (document.querySelector('.btn-next')) {
-        new ProNewRunner(panel).run();
+        new ProNewRunner().run();
       } else {
-        new ProOldRunner(panel).run();
+        new ProOldRunner().run();
       }
     } else {
       panel.resetStartButton('开始刷课');
@@ -2813,7 +2736,8 @@ ${ocrText}
 
   // ---- 启动 ----
   async function boot() {
-    if (Utils.inIframe()) return;
+    // 主要是规避firefox会创建多个iframe的问题
+    if (window.top !== window.self) return;
     await Utils.waitForMountTarget();
     try {
       panel = createPanel();
