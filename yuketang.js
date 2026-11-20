@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.8
+// @version      3.0.9
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.8',     // 版本号
+    version: '3.0.9',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -39,7 +39,8 @@
       proClassCount: 'pro_lms_classCount',
       feature: 'ykt_feature_conf', // 是否开启AI作答/自动评论
       rate: 'ykt_rate_conf', // 视频倍速配置：目标倍速与各解锁限制修改点开关
-      pendingAutoStart: 'ykt_pending_auto_start'
+      pendingAutoStart: 'ykt_pending_auto_start',
+      userStopped: 'ykt_user_stopped' // 用户已点击停止刷课（持久化，防止重新加载后自动恢复）
     }
   };
 
@@ -59,6 +60,12 @@
       return new Promise(resolve => {
         const start = Date.now();
         const timer = setInterval(() => {
+          // 停止刷课后立即中止所有轮询，让流程尽快收尾
+          if (Session.isStopped()) {
+            clearInterval(timer);
+            resolve(false);
+            return;
+          }
           if (checker()) {
             clearInterval(timer);
             resolve(true);
@@ -269,6 +276,28 @@
     clearPendingAutoStart() {
       localStorage.removeItem(Config.storageKeys.pendingAutoStart);
     },
+    isUserStopped() {
+      return localStorage.getItem(Config.storageKeys.userStopped) === '1';
+    },
+    setUserStopped(on) {
+      if (on) localStorage.setItem(Config.storageKeys.userStopped, '1');
+      else localStorage.removeItem(Config.storageKeys.userStopped);
+    },
+  };
+
+  // ---- 刷课会话状态 ----
+  // 用户点击“停止刷课”后持久化停止标记：重新加载页面（含其它标签页）也不会自动恢复刷课，
+  // 只有再次点击“开始刷课”才会清除该状态。每次读取持久化值，保证多标签页之间状态一致。
+  const Session = {
+    isStopped() {
+      return Store.isUserStopped();
+    },
+    begin() {
+      Store.setUserStopped(false);
+    },
+    stop() {
+      Store.setUserStopped(true);
+    }
   };
 
   // ---- UI 面板 ----
@@ -831,15 +860,23 @@
       log('已清除当前课程的刷课进度缓存');
     };
 
-    // 停止刷课：清除自动恢复标记后刷新页面，刷新后脚本回到空闲状态（进度缓存保留）
+    let stopHandler = null;
+    // 停止刷课：交给外部处理器结束会话并还原对页面/播放器的修改（进度缓存保留）
     ui.btnStop.onclick = () => {
+      if (stopHandler) {
+        stopHandler();
+        return;
+      }
+      Session.stop();
       Store.clearPendingAutoStart();
       log('已停止刷课');
     };
 
-    // 重新加载：重建自动恢复标记后刷新页面，刷新后自动恢复刷课（停止后点击同样生效）
+    // 重新加载：刷新页面；刷课进行中会自动续跑，已停止刷课时仅重新加载、不会自动恢复
     ui.btnReload.onclick = () => {
-      Store.setPendingAutoStart(Utils.getCurrentClassroomId());
+      if (!Session.isStopped()) {
+        Store.setPendingAutoStart(Utils.getCurrentClassroomId());
+      }
       log('正在重新加载脚本...');
       window.parent.location.reload();
     };
@@ -866,6 +903,9 @@
       setStartHandler(fn) {
         startHandler = fn;
         ui.btnStart.onclick = invokeStart;
+      },
+      setStopHandler(fn) {
+        stopHandler = fn;
       },
       start() {
         invokeStart();
@@ -1012,6 +1052,58 @@
     }
   };
 
+  // ---- 页面/播放器修改的还原记录 ----
+  // 快照脚本首次改动前的原值（媒体倍速/音量/静音、速度按钮 DOM、防切屏包装），
+  // 停止刷课时一次性还原。用 Map 保证还原时可枚举全部对象（记录仅在页面生命周期内有效）。
+  const PageRestore = {
+    mediaStates: new Map(), // media -> { playbackRate, volume, muted, defaultMuted }
+    nodeStates: new Map(), // node -> { attrs: {name: 原值|null}, text }
+    screenCheckUndo: null,
+
+    snapshotMedia(media) {
+      if (!media || this.mediaStates.has(media)) return;
+      this.mediaStates.set(media, {
+        playbackRate: media.playbackRate,
+        volume: media.volume,
+        muted: media.muted,
+        defaultMuted: media.defaultMuted
+      });
+    },
+    snapshotNode(node, attrs = []) {
+      if (!node || this.nodeStates.has(node)) return;
+      const savedAttrs = {};
+      for (const name of attrs) savedAttrs[name] = node.getAttribute(name);
+      this.nodeStates.set(node, { attrs: savedAttrs, text: node.innerText });
+    },
+    restoreAll() {
+      // 先卸载播放器包装，避免还原倍速时被拦截
+      RateUnlock.uninstallAll();
+      for (const [media, state] of this.mediaStates) {
+        try {
+          media.playbackRate = state.playbackRate;
+          media.volume = state.volume;
+          media.muted = state.muted;
+          media.defaultMuted = state.defaultMuted;
+        } catch (_) { /* 单个对象还原失败不影响其余对象 */ }
+      }
+      this.mediaStates.clear();
+      for (const [node, state] of this.nodeStates) {
+        try {
+          for (const [name, value] of Object.entries(state.attrs)) {
+            if (value === null) node.removeAttribute(name);
+            else node.setAttribute(name, value);
+          }
+          node.innerText = state.text;
+        } catch (_) { }
+      }
+      this.nodeStates.clear();
+      if (this.screenCheckUndo) {
+        this.screenCheckUndo();
+        this.screenCheckUndo = null;
+      }
+    }
+  };
+
   // ---- 播放器工具 ----
   const Player = {
     isNearEnd(media, threshold = 1) {
@@ -1021,14 +1113,19 @@
       return Number.isFinite(duration) && duration > 1 && currentTime > 0 && duration - currentTime <= threshold;
     },
     applySpeed(media) {
+      if (Session.isStopped()) return;
       const conf = Store.getRateConf();
       const rate = conf.targetRate;
       // 解锁包装必须先于首次设置倍速安装：设速触发的 ratechange 正是限速监听写回 1 的时机
       RateUnlock.ensure(media);
+      const video = media && media.tagName?.toLowerCase() === 'video' ? media : document.querySelector('video');
       const speedBtn = document.querySelector('xt-speedlist xt-button') || document.getElementsByTagName('xt-speedlist')[0]?.firstElementChild?.firstElementChild;
       const speedWrap = document.getElementsByTagName('xt-speedbutton')[0];
       const rateText = Number(rate).toFixed(2);
       if (conf.buttonSetEnabled && speedBtn && speedWrap) {
+        // 记录原值，停止刷课时还原
+        PageRestore.snapshotMedia(video);
+        PageRestore.snapshotNode(speedBtn, ['data-speed', 'keyt']);
         speedBtn.setAttribute('data-speed', rate);
         speedBtn.setAttribute('keyt', rateText);
         speedBtn.innerText = `${rateText}X`;
@@ -1036,20 +1133,27 @@
         mousemove.initMouseEvent('mousemove', true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
         speedWrap.dispatchEvent(mousemove);
         speedBtn.click();
-      } else if (conf.directSetEnabled && document.querySelector('video')) {
-        document.querySelector('video').playbackRate = rate;
+      } else if (conf.directSetEnabled && video) {
+        PageRestore.snapshotMedia(video);
+        video.playbackRate = rate;
       }
     },
     mute() {
+      if (Session.isStopped()) return;
       const muteBtn = document.querySelector('#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon');
       if (muteBtn) muteBtn.click();
       const video = document.querySelector('video');
-      if (video) video.volume = 0;
+      if (video) {
+        PageRestore.snapshotMedia(video);
+        video.volume = 0;
+      }
     },
     applyMediaDefault(media) {
-      if (!media) return;
+      if (!media || Session.isStopped()) return;
       // 解锁包装必须先于首次设置倍速安装
       RateUnlock.ensure(media);
+      // 记录原值，停止刷课时还原
+      PageRestore.snapshotMedia(media);
       media.play();
       media.volume = 0;
       const conf = Store.getRateConf();
@@ -1057,7 +1161,7 @@
     },
     observePause(video, shouldResume = () => true) {
       if (!video) return () => { };
-      const canResume = () => shouldResume() && !video.ended && !this.isNearEnd(video);
+      const canResume = () => shouldResume() && !Session.isStopped() && !video.ended && !this.isNearEnd(video);
       // 自动播放
       const playVideo = () => {
         if (!canResume()) return;
@@ -1097,16 +1201,19 @@
         if (!media) return resolve();
         if (media.ended) return resolve();
         let timer;
-        const onEnded = () => {
+        let stopTimer;
+        const finish = () => {
           clearTimeout(timer);
+          clearInterval(stopTimer);
+          media.removeEventListener('ended', onEnded);
           resolve();
         };
+        const onEnded = () => finish();
         media.addEventListener('ended', onEnded, { once: true });
+        // 停止刷课时提前结束等待，让调用流程尽快收尾
+        stopTimer = setInterval(() => { if (Session.isStopped()) finish(); }, 500);
         if (timeout > 0) {
-          timer = setTimeout(() => {
-            media.removeEventListener('ended', onEnded);
-            resolve();
-          }, timeout);
+          timer = setTimeout(finish, timeout);
         }
       });
     }
@@ -1174,13 +1281,15 @@
     keepAlive(shouldResume = () => true) {
       let lastMedia = null;
       const tick = () => {
-        if (!shouldResume()) return;
+        if (!shouldResume() || Session.isStopped()) return;
         const media = this.getMedia();
         if (!media) return;
         if (lastMedia !== media) {
           lastMedia = media;
           media.addEventListener('pause', tick);
         }
+        // 记录原值，停止刷课时还原
+        PageRestore.snapshotMedia(media);
         media.muted = true;
         media.defaultMuted = true;
         media.volume = 0;
@@ -1319,22 +1428,43 @@
   // ---- 防切屏 ----
   function preventScreenCheck() {
     const win = unsafeWindow;
+    // 幂等安装：重复调用不再叠加包装，并登记还原入口（停止刷课时恢复页面原行为）
+    if (PageRestore.screenCheckUndo) return;
     const blackList = new Set(['visibilitychange', 'blur', 'pagehide']);
-    win._addEventListener = win.addEventListener;
+    const origWinAdd = win.addEventListener;
+    const origDocAdd = document.addEventListener;
+    win._addEventListener = origWinAdd;
     win.addEventListener = (...args) => blackList.has(args[0]) ? undefined : win._addEventListener(...args);
-    document._addEventListener = document.addEventListener;
+    document._addEventListener = origDocAdd;
     document.addEventListener = (...args) => blackList.has(args[0]) ? undefined : document._addEventListener(...args);
+    // 属性遮蔽声明为可配置，便于停止刷课时删除还原
     Object.defineProperties(document, {
-      hidden: { value: false },
-      visibilityState: { value: 'visible' },
-      hasFocus: { value: () => true },
-      onvisibilitychange: { get: () => undefined, set: () => { } },
-      onblur: { get: () => undefined, set: () => { } }
+      hidden: { value: false, configurable: true },
+      visibilityState: { value: 'visible', configurable: true },
+      hasFocus: { value: () => true, configurable: true },
+      onvisibilitychange: { get: () => undefined, set: () => { }, configurable: true },
+      onblur: { get: () => undefined, set: () => { }, configurable: true }
     });
     Object.defineProperties(win, {
-      onblur: { get: () => undefined, set: () => { } },
-      onpagehide: { get: () => undefined, set: () => { } }
+      onblur: { get: () => undefined, set: () => { }, configurable: true },
+      onpagehide: { get: () => undefined, set: () => { }, configurable: true }
     });
+    PageRestore.screenCheckUndo = () => {
+      try {
+        win.addEventListener = origWinAdd;
+        delete win._addEventListener;
+      } catch (_) { /* 尽力还原 */ }
+      try {
+        document.addEventListener = origDocAdd;
+        delete document._addEventListener;
+      } catch (_) { }
+      for (const key of ['hidden', 'visibilityState', 'hasFocus', 'onvisibilitychange', 'onblur']) {
+        try { delete document[key]; } catch (_) { }
+      }
+      for (const key of ['onblur', 'onpagehide']) {
+        try { delete win[key]; } catch (_) { }
+      }
+    };
   }
 
   // ---- OCR & AI ----
@@ -1692,7 +1822,7 @@ ${ocrText}
           await Utils.sleep(1000);
         }
       }
-      while (true) {
+      while (!Session.isStopped()) {
         await this.autoSlide();
         const list = document.querySelector('.logs-list')?.childNodes;
         if (!list || !list.length) {
@@ -1755,7 +1885,7 @@ ${ocrText}
           this.panel.log('非视频/批量/课件/考试，已跳过');
           this.updateProgress(this.outside + 1, 0);
         }
-        if (this.shouldStop) return;
+        if (this.shouldStop || Session.isStopped()) return;
       }
     }
 
@@ -1783,6 +1913,7 @@ ${ocrText}
         return isDeadline || Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 5000, timeout: await Utils.getDDL() });
       stopObserve();
+      if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
       history.back();
       await Utils.sleep(1200);
@@ -1833,7 +1964,7 @@ ${ocrText}
           idx++;
           this.updateProgress(this.outside, idx);
         }
-        if (this.shouldStop) return;
+        if (this.shouldStop || Session.isStopped()) return;
       }
       this.updateProgress(this.outside + 1, 0);
       await Utils.sleep(1000);
@@ -1850,6 +1981,7 @@ ${ocrText}
         Utils.dismissPopups();
         return Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 3000, timeout: await Utils.getDDL() });
+      if (Session.isStopped()) return idx;
       this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
@@ -1872,6 +2004,7 @@ ${ocrText}
         return Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 3000, timeout: await Utils.getDDL() });
       stopObserve();
+      if (Session.isStopped()) return idx;
       this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
@@ -2031,10 +2164,11 @@ ${ocrText}
         Player.applyMediaDefault(video);
         await Player.waitForEnd(video);
       }
-      if (audio) {
+      if (!Session.isStopped() && audio) {
         Player.applyMediaDefault(audio);
         await Player.waitForEnd(audio);
       }
+      if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
       history.go(-1);
       await Utils.sleep(1200);
@@ -2048,7 +2182,7 @@ ${ocrText}
       let stopObserve = () => { };
       let reopenAttempts = 0;
       try {
-        while (Date.now() - start < deadline) {
+        while (Date.now() - start < deadline && !Session.isStopped()) {
           Utils.dismissPopups();
           const video = document.querySelector('video');
           const display = document.querySelector('.xt_video_player_current_time_display');
@@ -2117,6 +2251,7 @@ ${ocrText}
         const slides = document.querySelector('.swiper-wrapper')?.children || [];
         this.panel.log(`开始播放 PPT：${className}`);
         for (let i = 0; i < slides.length; i++) {
+          if (Session.isStopped()) return;
           slides[i].click();
           this.panel.log(`${className}：第 ${i + 1} 张`);
           await Utils.sleep(Config.pptInterval);
@@ -2126,6 +2261,7 @@ ${ocrText}
         if (videoBoxes?.length) {
           this.panel.log('PPT 中有视频，继续播放');
           for (let i = 0; i < videoBoxes.length; i++) {
+            if (Session.isStopped()) return;
             if (videoBoxes[i].innerText === '已完成') {
               this.panel.log(`第 ${i + 1} 个视频已完成，跳过`);
               continue;
@@ -2145,6 +2281,7 @@ ${ocrText}
           this.panel.log(`${className} 视频播放完毕`);
         }
       }
+      if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
       history.back();
       await Utils.sleep(1000);
@@ -2177,7 +2314,7 @@ ${ocrText}
     async run() {
       preventScreenCheck();
       let classCount = Store.getProClassCount();
-      while (true) {
+      while (!Session.isStopped()) {
         this.panel.log(`准备播放第 ${classCount} 集...`);
         await Utils.sleep(2000);
         const className = document.querySelector('.header-bar')?.firstElementChild?.innerText || '';
@@ -2206,9 +2343,11 @@ ${ocrText}
 
             const videoWaitStart = Date.now();
             videoTimer = setInterval(() => {
+              if (Session.isStopped()) return;
               const video = document.querySelector('video');
               if (video) {
                 setTimeout(() => {
+                  if (Session.isStopped()) return;
                   Player.applySpeed();
                   Player.mute();
                   Player.observePause(video);
@@ -2242,6 +2381,7 @@ ${ocrText}
           this.panel.log(`已看过：${className}`);
           await Utils.sleep(2000);
         }
+        if (Session.isStopped()) return;
         this.panel.log(`第 ${classCount} 集播放完毕`);
         classCount++;
         Store.setProClassCount(classCount);
@@ -2286,6 +2426,7 @@ ${ocrText}
     }
 
     async autoSelect() {
+      if (Session.isStopped()) return;
       // 进入ai - workspace的方式有两种：可以处理两种不同的逻辑，增加兼容性
       const returnUrl = this.getReturnUrl()
       // 1. 从传统的 v2 - pro / lms 的目录新开标签页进入（开始刷课）的
@@ -2338,6 +2479,7 @@ ${ocrText}
       const title = AiWorkspace.getActiveLeafTitle() || `${route.type} ${route.leafId}`;
       this.panel.log(`开始播放：${title}`);
       const ready = await Utils.poll(() => Boolean(AiWorkspace.getMedia()), { interval: 500, timeout: 20000 });
+      if (Session.isStopped()) return false;
       let media = AiWorkspace.getMedia();
       if (!ready || !media) {
         this.panel.log('未找到视频/音频元素，停止当前轮次');
@@ -2367,7 +2509,7 @@ ${ocrText}
           return currentTime > startTime + 0.5 || (!media.paused && media.readyState >= 2 && currentTime > startTime + 0.2);
         }, { interval: 500, timeout: 15000 });
         if (!started) {
-          this.panel.log('未确认到视频实际开始播放，停止当前轮次');
+          if (!Session.isStopped()) this.panel.log('未确认到视频实际开始播放，停止当前轮次');
           return false;
         }
         startTime = Number(media.currentTime || 0);
@@ -2397,7 +2539,7 @@ ${ocrText}
         media.removeEventListener('ended', onEnded);
         playbackState.completed = true;
         if (!done) {
-          this.panel.log('等待播放完成超时，停止当前轮次');
+          if (!Session.isStopped()) this.panel.log('等待播放完成超时，停止当前轮次');
           return false;
         }
       } finally {
@@ -2481,6 +2623,7 @@ ${ocrText}
       }
 
       const ready = await Utils.poll(() => Boolean(AiWorkspace.getExerciseContainer()), { interval: 500, timeout: 20000 });
+      if (Session.isStopped()) return true;
       const root = AiWorkspace.getExerciseContainer();
       if (!ready || !root) {
         this.panel.log('未找到作业容器，停止当前轮次');
@@ -2492,6 +2635,7 @@ ${ocrText}
       if (tabs.length) {
         this.panel.log(`检测到题目索引 ${tabs.length} 个，按题号顺序作答`);
         for (let i = 0; i < tabs.length; i++) {
+          if (Session.isStopped()) return true;
           const currentRoot = AiWorkspace.getExerciseContainer() || root;
           const currentTabs = AiWorkspace.getExerciseQuestionTabs(currentRoot);
           const currentTab = currentTabs[i];
@@ -2506,6 +2650,7 @@ ${ocrText}
       this.panel.log('未找到题号列表，尝试只处理当前题并按下一题推进');
       let previousFingerprint = '';
       for (let i = 0; i < 20; i++) {
+        if (Session.isStopped()) return true;
         const currentRoot = AiWorkspace.getExerciseContainer() || root;
         const questionRoot = AiWorkspace.getExerciseQuestionBody(currentRoot);
         const fingerprint = AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
@@ -2521,6 +2666,7 @@ ${ocrText}
 
     // 直接在ai-workspace页面处理课程的逻辑
     async handleNext(count) {
+      if (Session.isStopped()) return;
       if (count >= this.source.length) {
         this.panel.log('课程刷完啦 🎉');
         this.panel.resetStartButton('刷完啦~');
@@ -2554,6 +2700,7 @@ ${ocrText}
         await Utils.sleep(2000);
         ok = true;
       }
+      if (Session.isStopped()) return;
       if (!ok) this.panel.warn("(该视频可能已经刷完了)，即将跳过开始下一个");
       // 继续下一个
       await this.autoSelect()
@@ -2561,7 +2708,18 @@ ${ocrText}
   }
 
   // ---- 路由 ----
+  // 停止刷课：结束当前会话、还原对页面/播放器的修改，并持久化停止状态（重新加载也不会自动恢复）
+  function stopBrushing() {
+    Session.stop();
+    Store.clearPendingAutoStart();
+    PageRestore.restoreAll();
+    panel.resetStartButton('开始刷课');
+    panel.log('已停止刷课：对页面/播放器的修改已还原；重新加载后不会自动恢复，点击[开始刷课]可重新启动');
+  }
+
   function start() {
+    // 显式开始刷课：清除“用户已停止”状态，之后的跨页面跳转才允许自动续跑
+    Session.begin();
     // ---- ai-workspace获取课程根目录信息并保存（处理完一个课程重定向到根目录） ----
     const classroomId = Utils.getCurrentClassroomId();
     const returnUrl = Utils.returnUrl()
@@ -2599,10 +2757,12 @@ ${ocrText}
       panel = createPanel();
       panel.log(`雨课堂刷课助手 v${Config.version} 已加载`);
       panel.setStartHandler(start);
+      panel.setStopHandler(stopBrushing);
       const pendingAutoStart = Store.getPendingAutoStart();
       const currentClassroomId = Utils.getCurrentClassroomId();
       if (
         pendingAutoStart
+        && !Session.isStopped()
         && Utils.isSupportedLearningPage()
         && currentClassroomId
         && pendingAutoStart.classroomId === currentClassroomId
