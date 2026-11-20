@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.9
+// @version      3.1.0
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.9',     // 版本号
+    version: '3.1.0',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -39,6 +39,7 @@
       proClassCount: 'pro_lms_classCount',
       feature: 'ykt_feature_conf', // 是否开启AI作答/自动评论
       rate: 'ykt_rate_conf', // 视频倍速配置：目标倍速与各解锁限制修改点开关
+      flow: 'ykt_flow_conf', // 刷课流程配置：自动切换任务点/界面、停止后还原修改
       pendingAutoStart: 'ykt_pending_auto_start',
       userStopped: 'ykt_user_stopped' // 用户已点击停止刷课（持久化，防止重新加载后自动恢复）
     }
@@ -248,11 +249,20 @@
         directSetEnabled: saved.directSetEnabled ?? true,
         keepAliveEnabled: saved.keepAliveEnabled ?? true,
         ratechangeBlockEnabled: saved.ratechangeBlockEnabled ?? true,
-        pauseGuardEnabled: saved.pauseGuardEnabled ?? true,
       };
     },
     setRateConf(conf) {
       localStorage.setItem(Config.storageKeys.rate, JSON.stringify(conf));
+    },
+    getFlowConf() {
+      const saved = Utils.safeJSONParse(localStorage.getItem(Config.storageKeys.flow), {}) || {};
+      return {
+        autoSwitch: saved.autoSwitch ?? true,
+        restoreOnStop: saved.restoreOnStop ?? true,
+      };
+    },
+    setFlowConf(conf) {
+      localStorage.setItem(Config.storageKeys.flow, JSON.stringify(conf));
     },
     getPendingAutoStart() {
       const raw = localStorage.getItem(Config.storageKeys.pendingAutoStart);
@@ -645,14 +655,24 @@
                     <input type="checkbox" id="rate_unlock">
                     解除倍速限制：拦截倍速回写（新增）
                   </label>
-                  <div class="hint">包装播放器实例，拦截限速监听在 ratechange 事件期间把倍速重置为 1；仅对探测到的 Video.js 风格播放器生效，页面若通过异步或其它接口限速则无法拦截</div>
+                  <div class="hint">包装媒体元素的 playbackRate，拦截雨课堂播放器把倍速回写为低值（含限速定时器的异步回写）；用户手动调速不受影响</div>
+                </div>
+                <div class="form-item">
+                  <label style="font-weight:bold;font-size:13px;">刷课流程</label>
                 </div>
                 <div class="form-item">
                   <label class="checkbox-label">
-                    <input type="checkbox" id="rate_pause_guard">
-                    限速暂停拦截（新增）
+                    <input type="checkbox" id="flow_auto_switch">
+                    自动切换下一个任务点/切换界面
                   </label>
-                  <div class="hint">拦截限速监听在 ratechange 事件期间的惩罚性暂停；窗口外的暂停（含手动暂停）不受影响。效果依赖页面限速行为，可随时关闭回退</div>
+                  <div class="hint">开启：当前任务点完成后自动点击下一个任务点或跳转其它页面继续刷课；关闭：完成后停留当前页面，手动切换后点击[开始刷课]继续（避免切换页面后抓取失败）</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="flow_restore_on_stop">
+                    停止刷课后还原修改
+                  </label>
+                  <div class="hint">开启：点击[停止刷课]时还原倍速、静音、倍速拦截包装等页面修改；关闭：保留这些修改（例如继续保持倍速播放）</div>
                 </div>
                 <div class="settings-footer">
                   <button id="save_settings">保存并关闭</button>
@@ -697,7 +717,8 @@
       rateDirectSet: doc.getElementById('rate_direct_set'),
       rateKeepAlive: doc.getElementById('rate_keep_alive'),
       rateUnlock: doc.getElementById('rate_unlock'),
-      ratePauseGuard: doc.getElementById('rate_pause_guard'),
+      flowAutoSwitch: doc.getElementById('flow_auto_switch'),
+      flowRestoreOnStop: doc.getElementById('flow_restore_on_stop'),
       minimality: doc.getElementById('minimality'),
       question: doc.getElementById('question'),
       miniBasic: doc.getElementById('mini-basic')
@@ -806,15 +827,21 @@
       ui.rateDirectSet.checked = saved.directSetEnabled;
       ui.rateKeepAlive.checked = saved.keepAliveEnabled;
       ui.rateUnlock.checked = saved.ratechangeBlockEnabled;
-      ui.ratePauseGuard.checked = saved.pauseGuardEnabled;
+    };
+    const loadFlowConf = () => {
+      const saved = Store.getFlowConf();
+      ui.flowAutoSwitch.checked = saved.autoSwitch;
+      ui.flowRestoreOnStop.checked = saved.restoreOnStop;
     };
     loadAIConf();
     loadFeatureConf();
     loadRateConf();
+    loadFlowConf();
     ui.btnSetting.onclick = () => {
       loadAIConf();
       loadFeatureConf();
       loadRateConf();
+      loadFlowConf();
       ui.settings.style.display = 'block';
     };
     ui.closeSettings.onclick = () => {
@@ -840,11 +867,15 @@
         buttonSetEnabled: ui.rateButtonSet.checked,
         directSetEnabled: ui.rateDirectSet.checked,
         keepAliveEnabled: ui.rateKeepAlive.checked,
-        ratechangeBlockEnabled: ui.rateUnlock.checked,
-        pauseGuardEnabled: ui.ratePauseGuard.checked
+        ratechangeBlockEnabled: ui.rateUnlock.checked
       };
       Store.setRateConf(rateConf);
-      // 先还原旧的播放器包装，下次接管播放器时按新开关重新安装
+      const flowConf = {
+        autoSwitch: ui.flowAutoSwitch.checked,
+        restoreOnStop: ui.flowRestoreOnStop.checked
+      };
+      Store.setFlowConf(flowConf);
+      // 先还原旧的倍速拦截包装，下次接管媒体时按新开关重新安装
       RateUnlock.uninstallAll();
       ui.settings.style.display = 'none';
       log('✅ 脚本配置已保存');
@@ -917,138 +948,77 @@
     };
   }
 
-  // ---- 倍速解锁适配层（迁移自《视频倍速逻辑迁移说明》第一层机制）----
-  // 页面限速监听器会在 ratechange 事件同步派发期间把倍速写回 1（并可能顺带 pause）。
-  // 这里不删除它的监听（内部数据结构不可靠），而是在播放器实例上包装 trigger/playbackRate/pause：
-  // trigger 派发 ratechange 期间打标记，只在该同步派发窗口内拦截“写回 1”和“惩罚性暂停”。
+  // ---- 倍速解锁：拦截雨课堂 xt 播放器的倍速回写 ----
+  // xt 播放器的限速器（timeupdate + setInterval 每秒执行）会把倍速强制写回内部记录值（默认 1）。
+  // 这里不删除页面的监听（内部数据结构不可靠），而是包装媒体元素自身的 playbackRate setter：
+  // 拦截低于目标倍速的非手动回写（限速定时器/事件回调里的回写），用户手势内的手动调速放行。
   const RateUnlock = {
-    // player -> { origTrigger, origRate, origPause, hadOwnTrigger, hadOwnRate, hadOwnPause }
-    // 用 Map 而非 WeakMap：卸载时需要枚举全部已包装实例以还原方法（记录体积很小，可忽略持有开销）
-    installed: new Map(),
+    // media -> { hadOwn, origDesc }：元素级 playbackRate 包装的还原记录
+    // 用 Map 而非 WeakMap：卸载时需要枚举全部已包装元素以还原（记录体积很小，可忽略持有开销）
+    installedMedia: new Map(),
 
-    // 安全探测 Video.js 风格播放器实例；探测不到返回 null（此时仅现有设速路径生效）
-    locatePlayer(media) {
-      if (!media) return null;
-      const videojs = typeof unsafeWindow !== 'undefined' ? unsafeWindow.videojs : null;
-      const candidates = [
-        media.player,
-        media.el_ && media.el_.player,
-        videojs && typeof videojs.getPlayer === 'function' ? videojs.getPlayer(media) : null
-      ];
-      for (const player of candidates) {
-        if (player
-          && typeof player.trigger === 'function'
-          && typeof player.playbackRate === 'function'
-          && typeof player.pause === 'function') {
-          return player;
-        }
-      }
-      return null;
-    },
-
-    // 幂等安装：同一实例重复调用不叠加包装；任一步赋值失败立即回滚，不留部分替换
-    install(media) {
-      const conf = Store.getRateConf();
-      const wrapRate = conf.ratechangeBlockEnabled;
-      const wrapPause = conf.pauseGuardEnabled;
-      if (!wrapRate && !wrapPause) return false;
-      const player = this.locatePlayer(media);
-      if (!player) {
-        // 仅提示一次：未探测到播放器实例时其余设速路径照常工作，避免反复刷日志
-        if (!this.notFoundLogged) {
-          this.notFoundLogged = true;
-          console.log('[倍速] 未探测到 Video.js 风格播放器实例，跳过倍速解锁（按钮改写/直设/保活路径不受影响）');
-        }
-        return false;
-      }
-      if (this.installed.has(player)) return true;
-
-      const origTrigger = player.trigger;
-      const origRate = player.playbackRate;
-      const origPause = player.pause;
-      let inRatechange = false;
-      let rateInterceptLogged = false;
-      let pauseInterceptLogged = false;
-      const triggerWrap = function (event) {
-        const type = typeof event === 'string' ? event : event && event.type;
-        if (type !== 'ratechange') return origTrigger.apply(this, arguments);
-        inRatechange = true;
-        try {
-          return origTrigger.apply(this, arguments);
-        } finally {
-          inRatechange = false;
-        }
-      };
-      const rateWrap = function (value) {
-        // 仅拦截“限速器在派发期间把大于 1 的倍速写回 1”的那一次调用，其余调用原样转发
-        if (arguments.length > 0 && inRatechange && Number(value) === 1 && Number(origRate.call(player)) > 1) {
-          if (!rateInterceptLogged) {
-            rateInterceptLogged = true;
-            console.log('[倍速] 已拦截播放器的倍速重置（解除倍速限制生效）');
-          }
-          return player;
-        }
-        return arguments.length > 0 ? origRate.call(player, value) : origRate.call(player);
-      };
-      const pauseWrap = function () {
-        // 拦截限速监听器在派发窗口内的惩罚性暂停；窗口外的暂停（含手动暂停）不受影响
-        if (inRatechange) {
-          if (!pauseInterceptLogged) {
-            pauseInterceptLogged = true;
-            console.log('[倍速] 已拦截限速器的惩罚性暂停（限速暂停拦截生效）');
-          }
-          return player;
-        }
-        return origPause.apply(this, arguments);
-      };
-
-      // 记录属性是否为自有属性：卸载时自有属性还原原值，原本继承的直接删除以恢复原型链查找
-      const record = {
-        origTrigger, origRate, origPause,
-        hadOwnTrigger: Object.prototype.hasOwnProperty.call(player, 'trigger'),
-        hadOwnRate: Object.prototype.hasOwnProperty.call(player, 'playbackRate'),
-        hadOwnPause: Object.prototype.hasOwnProperty.call(player, 'pause')
-      };
+    // 幂等安装：同一元素重复调用不叠加包装
+    installElement(media) {
+      if (!media || !Store.getRateConf().ratechangeBlockEnabled) return false;
+      if (this.installedMedia.has(media)) return true;
+      const ownDesc = Object.getOwnPropertyDescriptor(media, 'playbackRate');
+      const desc = ownDesc || Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
+      if (!desc || typeof desc.get !== 'function' || typeof desc.set !== 'function') return false;
+      let interceptLogged = false;
       try {
-        player.trigger = triggerWrap;
-        if (wrapRate) player.playbackRate = rateWrap;
-        if (wrapPause) player.pause = pauseWrap;
+        Object.defineProperty(media, 'playbackRate', {
+          configurable: true,
+          enumerable: desc.enumerable,
+          get() {
+            return desc.get.call(this);
+          },
+          set(value) {
+            const num = Number(value);
+            const conf = Store.getRateConf();
+            // 低于目标倍速的非手动回写（如限速定时器写回 1）一律拦截
+            if (conf.ratechangeBlockEnabled && conf.targetRate > 1
+              && Number.isFinite(num) && num < conf.targetRate
+              && !RateUnlock.isUserGesture()) {
+              if (!interceptLogged) {
+                interceptLogged = true;
+                console.log('[倍速] 已拦截页面的倍速回写（解除倍速限制生效）');
+              }
+              return;
+            }
+            desc.set.call(this, value);
+          }
+        });
       } catch (e) {
-        this.restore(player, record);
-        console.warn('[倍速] 解除倍速限制安装失败，已还原原始方法：', e);
+        console.warn('[倍速] 倍速回写拦截安装失败：', e);
         return false;
       }
-      this.installed.set(player, record);
-      console.log(`[倍速] 倍速解锁已安装：回写拦截 ${wrapRate ? '开' : '关'}，暂停拦截 ${wrapPause ? '开' : '关'}`);
+      this.installedMedia.set(media, { hadOwn: !!ownDesc, origDesc: ownDesc || null });
+      console.log(`[倍速] 倍速回写拦截已启用：低于 ${Store.getRateConf().targetRate}x 的非手动回写将被拦截`);
       return true;
     },
 
-    // 还原单个实例被包装的方法
-    restore(player, record) {
-      const tryRestore = (key, hadOwn, orig) => {
-        try {
-          if (hadOwn) player[key] = orig;
-          else delete player[key];
-        } catch (_) { /* 单个还原失败不影响其它方法 */ }
-      };
-      tryRestore('trigger', record.hadOwnTrigger, record.origTrigger);
-      tryRestore('playbackRate', record.hadOwnRate, record.origRate);
-      tryRestore('pause', record.hadOwnPause, record.origPause);
+    // 是否处于用户手势中；不支持 userActivation 的浏览器按非手势处理（优先保证拦截生效）
+    isUserGesture() {
+      try {
+        if (navigator.userActivation) return navigator.userActivation.isActive === true;
+      } catch (_) { /* 忽略环境差异 */ }
+      return false;
     },
 
-    // 必须先于首次设置倍速调用：设速会触发 ratechange，限速监听正是在该事件里写回 1
+    // 必须先于首次设置倍速调用：设速后限速器就会开始回写
     ensure(media) {
-      const conf = Store.getRateConf();
-      if (!conf.ratechangeBlockEnabled && !conf.pauseGuardEnabled) return false;
-      return this.install(media || document.querySelector('video'));
+      return this.installElement(media || document.querySelector('video'));
     },
 
-    // 明确的清理/还原入口：恢复全部被包装的方法（面板保存后按新开关重新安装）
+    // 明确的清理/还原入口：恢复全部被包装的元素（面板保存后按新开关重新安装）
     uninstallAll() {
-      for (const [player, record] of this.installed) {
-        this.restore(player, record);
+      for (const [media, record] of this.installedMedia) {
+        try {
+          if (record.hadOwn && record.origDesc) Object.defineProperty(media, 'playbackRate', record.origDesc);
+          else delete media.playbackRate;
+        } catch (_) { /* 单个还原失败不影响其余对象 */ }
       }
-      this.installed.clear();
+      this.installedMedia.clear();
     }
   };
 
@@ -1076,7 +1046,7 @@
       this.nodeStates.set(node, { attrs: savedAttrs, text: node.innerText });
     },
     restoreAll() {
-      // 先卸载播放器包装，避免还原倍速时被拦截
+      // 先卸载倍速拦截包装，避免还原倍速时被拦截
       RateUnlock.uninstallAll();
       for (const [media, state] of this.mediaStates) {
         try {
@@ -1756,6 +1726,17 @@ ${ocrText}
     }
   };
 
+  // ---- 流程开关：自动切换下一个任务点/切换界面 ----
+  // 关闭后当前任务点完成（或失败）时不再点击下一个任务点、不再跳转其它页面，
+  // 提示后停在原地并清除跨页自动续跑标记，避免切换页面后抓取失败的连环报错
+  function haltIfNoAutoSwitch(panel, context) {
+    if (Store.getFlowConf().autoSwitch) return false;
+    panel.log(`${context}：已关闭“自动切换任务点/界面”，停留当前页面；请手动切换后点击[开始刷课]继续`);
+    Store.clearPendingAutoStart();
+    panel.resetStartButton('开始刷课');
+    return true;
+  }
+
   // ---- v2 逻辑 ----
   class V2Runner {
     constructor(panel) {
@@ -1818,6 +1799,7 @@ ${ocrText}
         if ((videoBox || document.querySelector('video')) && !boxText.includes('已完成')) {
           this.panel.log('检测到当前课件页，直接续播当前内容');
           await this.waitCoursewareVideo();
+          if (haltIfNoAutoSwitch(this.panel, '当前课件内容播放完成')) return;
           history.back();
           await Utils.sleep(1000);
         }
@@ -1831,6 +1813,7 @@ ${ocrText}
           const returnUrl = pending?.returnUrl
             || (pending?.classroomId ? `/v2/web/studentLog/${pending.classroomId}` : '');
           if (returnUrl && !location.pathname.includes('/studentLog/')) {
+            if (haltIfNoAutoSwitch(this.panel, '当前页面无课程列表')) return;
             this.panel.log('当前页面无课程列表，返回目录页继续');
             location.href = returnUrl;
             return;
@@ -1915,6 +1898,10 @@ ${ocrText}
       stopObserve();
       if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
+      if (haltIfNoAutoSwitch(this.panel, '当前视频播放完成')) {
+        this.shouldStop = true;
+        return;
+      }
       history.back();
       await Utils.sleep(1200);
     }
@@ -1985,6 +1972,10 @@ ${ocrText}
       this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
+      if (haltIfNoAutoSwitch(this.panel, `${title} 播放完成`)) {
+        this.shouldStop = true;
+        return idx;
+      }
       history.back();
       await Utils.sleep(1500);
       return idx;
@@ -2008,6 +1999,10 @@ ${ocrText}
       this.panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
+      if (haltIfNoAutoSwitch(this.panel, `${title} 播放完成`)) {
+        this.shouldStop = true;
+        return idx;
+      }
       history.back();
       await Utils.sleep(1500);
       return idx;
@@ -2024,6 +2019,10 @@ ${ocrText}
         this.panel.log(`${typeText}已查看，但未开启自动回复功能`);
         idx++;
         this.updateProgress(this.outside, idx);
+        if (haltIfNoAutoSwitch(this.panel, `${typeText}已查看`)) {
+          this.shouldStop = true;
+          return idx;
+        }
         history.back();
         await Utils.sleep(1000);
         return idx;
@@ -2072,6 +2071,10 @@ ${ocrText}
       }
       idx++;
       this.updateProgress(this.outside, idx);
+      if (haltIfNoAutoSwitch(this.panel, `${typeText}已处理`)) {
+        this.shouldStop = true;
+        return idx;
+      }
       history.back();
       await Utils.sleep(1000);
       return idx;
@@ -2143,6 +2146,10 @@ ${ocrText}
       }
       idx++;
       this.updateProgress(this.outside, idx);
+      if (haltIfNoAutoSwitch(this.panel, '当前作业处理完成')) {
+        this.shouldStop = true;
+        return idx;
+      }
       history.back();
       await Utils.sleep(1200);
       return idx;
@@ -2170,6 +2177,10 @@ ${ocrText}
       }
       if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
+      if (haltIfNoAutoSwitch(this.panel, '当前课堂内容播放完成')) {
+        this.shouldStop = true;
+        return;
+      }
       history.go(-1);
       await Utils.sleep(1200);
     }
@@ -2283,6 +2294,10 @@ ${ocrText}
       }
       if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
+      if (haltIfNoAutoSwitch(this.panel, '当前课件播放完成')) {
+        this.shouldStop = true;
+        return;
+      }
       history.back();
       await Utils.sleep(1000);
     }
@@ -2387,6 +2402,7 @@ ${ocrText}
         Store.setProClassCount(classCount);
         const nextBtn = document.querySelector('.btn-next');
         if (nextBtn) {
+          if (haltIfNoAutoSwitch(this.panel, `第 ${classCount - 1} 集播放完毕`)) break;
           const event1 = new Event('mousemove', { bubbles: true });
           event1.clientX = 9999;
           event1.clientY = 9999;
@@ -2498,7 +2514,7 @@ ${ocrText}
       }
       const stopKeepAlive = AiWorkspace.keepAlive(shouldResume);
       const rateConf = Store.getRateConf();
-      this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${rateConf.targetRate}x，静音开启；按钮设速:${rateConf.buttonSetEnabled ? '开' : '关'} 直设倍速:${rateConf.directSetEnabled ? '开' : '关'} 倍速保活:${rateConf.keepAliveEnabled ? '开' : '关'} 回写拦截:${rateConf.ratechangeBlockEnabled ? '开' : '关'} 暂停拦截:${rateConf.pauseGuardEnabled ? '开' : '关'}`);
+      this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${rateConf.targetRate}x，静音开启；按钮设速:${rateConf.buttonSetEnabled ? '开' : '关'} 直设倍速:${rateConf.directSetEnabled ? '开' : '关'} 倍速保活:${rateConf.keepAliveEnabled ? '开' : '关'} 回写拦截:${rateConf.ratechangeBlockEnabled ? '开' : '关'}`);
       try {
         let startTime = Number(media.currentTime || 0);
         const started = await Utils.poll(() => {
@@ -2701,8 +2717,9 @@ ${ocrText}
         ok = true;
       }
       if (Session.isStopped()) return;
-      if (!ok) this.panel.warn("(该视频可能已经刷完了)，即将跳过开始下一个");
-      // 继续下一个
+      if (!ok) this.panel.warn(Store.getFlowConf().autoSwitch ? '(该视频可能已经刷完了)，即将跳过开始下一个' : '(该视频可能已经刷完了)');
+      // 继续下一个任务点/界面；关闭自动切换时停留当前页面，避免切换后抓取失败
+      if (haltIfNoAutoSwitch(this.panel, ok ? '当前任务点处理完成' : '当前任务点处理结束')) return;
       await this.autoSelect()
     }
   }
@@ -2712,9 +2729,12 @@ ${ocrText}
   function stopBrushing() {
     Session.stop();
     Store.clearPendingAutoStart();
-    PageRestore.restoreAll();
+    const restoreOnStop = Store.getFlowConf().restoreOnStop;
+    if (restoreOnStop) PageRestore.restoreAll();
     panel.resetStartButton('开始刷课');
-    panel.log('已停止刷课：对页面/播放器的修改已还原；重新加载后不会自动恢复，点击[开始刷课]可重新启动');
+    panel.log(restoreOnStop
+      ? '已停止刷课：对页面/播放器的修改已还原；重新加载后不会自动恢复，点击[开始刷课]可重新启动'
+      : '已停止刷课：已按设置保留对页面/播放器的修改（倍速/静音等）；重新加载后不会自动恢复，点击[开始刷课]可重新启动');
   }
 
   function start() {
