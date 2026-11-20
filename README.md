@@ -65,5 +65,6 @@
 + ANGJustinl        添加AI伴学弹出窗口路由支持
 + tfia              增加了对 Anthropic 格式 API 和相应认证方式的支持，并增加选项供用户选择
 + xinyangcui        修复了面板增加停止刷课BUG、添加重新加载按钮
++ cow-your-sister   增加解锁倍速限制、反检测，优化部分文本描述和刷课启动/停止逻辑
 
 如有任何问题或提议，欢迎大家访问我的网站：[https://niuwh.cn](https://niuwh.cn) ,里面有我的联系方式。或者博客留言：[https://blog.niuwh.cn](https://blog.niuwh.cn)。
