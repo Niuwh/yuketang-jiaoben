@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.1.0
+// @version      3.1.1
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.1.0',     // 版本号
+    version: '3.1.1',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -672,7 +672,7 @@
                     <input type="checkbox" id="flow_restore_on_stop">
                     停止刷课后还原修改
                   </label>
-                  <div class="hint">开启：点击[停止刷课]时还原倍速、静音、倍速拦截包装等页面修改；关闭：保留这些修改（例如继续保持倍速播放）</div>
+                  <div class="hint">开启：点击[停止刷课]时还原倍速、静音、倍速/暂停拦截包装等页面修改；关闭：保留这些修改（例如继续保持倍速播放）</div>
                 </div>
                 <div class="settings-footer">
                   <button id="save_settings">保存并关闭</button>
@@ -1022,6 +1022,64 @@
     }
   };
 
+  // ---- 暂停拦截：把 pause 动作替换为空方法 ----
+  // 雨课堂 xt 播放器在切屏/失焦等场景会调用媒体的 pause() 做惩罚性暂停。
+  // 不采用“检测到暂停再自动播放”（会与页面的暂停逻辑互相打架），而是包装 pause 方法：
+  // 刷课进行中直接吞掉暂停动作；停止刷课/视频结束/临近结尾/任务完成时放行真实暂停。
+  const PauseGuard = {
+    // media -> { hadOwn, origPause, allowPause }：元素级 pause 包装的还原记录与放行判定
+    // 用 Map 而非 WeakMap：卸载时需要枚举全部已包装元素以还原（记录体积很小，可忽略持有开销）
+    installed: new Map(),
+
+    // 幂等安装：同一元素重复调用不叠加包装，仅更新放行判定（随任务轮换更新 shouldResume）
+    install(media, allowPause = () => true) {
+      if (!media) return false;
+      const record = this.installed.get(media);
+      if (record) {
+        record.allowPause = allowPause;
+        return true;
+      }
+      const hadOwn = Object.prototype.hasOwnProperty.call(media, 'pause');
+      const origPause = media.pause;
+      if (typeof origPause !== 'function') return false;
+      let interceptLogged = false;
+      try {
+        media.pause = function () {
+          const rec = PauseGuard.installed.get(media);
+          if (!rec || rec.allowPause()) return origPause.apply(this, arguments);
+          if (!interceptLogged) {
+            interceptLogged = true;
+            console.log('[暂停] 已拦截页面的暂停动作（暂停拦截生效）');
+          }
+          // 空方法：吞掉本次暂停动作
+        };
+      } catch (e) {
+        console.warn('[暂停] 暂停拦截安装失败：', e);
+        return false;
+      }
+      this.installed.set(media, { hadOwn, origPause, allowPause });
+      return true;
+    },
+
+    // 还原单个元素被包装的 pause
+    uninstall(media) {
+      const record = this.installed.get(media);
+      if (!record) return;
+      try {
+        if (record.hadOwn) media.pause = record.origPause;
+        else delete media.pause;
+      } catch (_) { /* 单个还原失败不影响其余对象 */ }
+      this.installed.delete(media);
+    },
+
+    // 明确的清理/还原入口：恢复全部被包装的元素（停止刷课时还原页面修改）
+    uninstallAll() {
+      for (const media of [...this.installed.keys()]) {
+        this.uninstall(media);
+      }
+    }
+  };
+
   // ---- 页面/播放器修改的还原记录 ----
   // 快照脚本首次改动前的原值（媒体倍速/音量/静音、速度按钮 DOM、防切屏包装），
   // 停止刷课时一次性还原。用 Map 保证还原时可枚举全部对象（记录仅在页面生命周期内有效）。
@@ -1046,8 +1104,9 @@
       this.nodeStates.set(node, { attrs: savedAttrs, text: node.innerText });
     },
     restoreAll() {
-      // 先卸载倍速拦截包装，避免还原倍速时被拦截
+      // 先卸载倍速/暂停拦截包装，避免还原时被拦截
       RateUnlock.uninstallAll();
+      PauseGuard.uninstallAll();
       for (const [media, state] of this.mediaStates) {
         try {
           media.playbackRate = state.playbackRate;
@@ -1129,41 +1188,26 @@
       const conf = Store.getRateConf();
       if (conf.directSetEnabled) media.playbackRate = conf.targetRate;
     },
-    observePause(video, shouldResume = () => true) {
-      if (!video) return () => { };
-      const canResume = () => shouldResume() && !Session.isStopped() && !video.ended && !this.isNearEnd(video);
-      // 自动播放
-      const playVideo = () => {
-        if (!canResume()) return;
-        video.play().catch(e => {
-          if (!canResume()) return;
+    // 暂停拦截：刷课期间把 pause 替换为空方法，而非“检测到暂停再自动播放”（后者会与页面暂停互相打架）
+    // 停止刷课/视频结束/临近结尾/任务完成时放行真实暂停
+    blockPause(media, shouldResume = () => true) {
+      if (!media) return () => { };
+      const allowPause = () => Session.isStopped() || media.ended || this.isNearEnd(media) || !shouldResume();
+      PauseGuard.install(media, allowPause);
+      // 启动播放（仅需一次；之后页面的暂停动作直接被拦截，无需反复检测恢复）
+      let retryTimer = 0;
+      const startPlay = () => {
+        if (allowPause()) return;
+        media.play().catch(e => {
+          if (allowPause()) return;
           console.warn('自动播放失败:', e);
-          setTimeout(playVideo, 3000);
+          retryTimer = setTimeout(startPlay, 3000);
         });
       };
-      playVideo();
-      // 直接监听 pause 事件，不依赖播放器 UI 元素
-      const onPause = () => { if (canResume()) playVideo(); };
-      video.addEventListener('pause', onPause);
-      // 定时兜底：防止 pause 事件被拦截
-      const timer = setInterval(() => { if (video.paused && canResume()) playVideo(); }, 5000);
-      // 播放器 UI 观察：按钮被点击暂停时 tip 变为「播放」
-      const target = document.getElementsByClassName('play-btn-tip')[0];
-      let observer = null;
-      if (target) {
-        observer = new MutationObserver(list => {
-          for (const mutation of list) {
-            if (mutation.type === 'childList' && target.innerText === '播放' && canResume()) {
-              video.play();
-            }
-          }
-        });
-        observer.observe(target, { childList: true });
-      }
+      startPlay();
       return () => {
-        video.removeEventListener('pause', onPause);
-        clearInterval(timer);
-        if (observer) observer.disconnect();
+        clearTimeout(retryTimer);
+        PauseGuard.uninstall(media);
       };
     },
     waitForEnd(media, timeout = 0) {
@@ -1256,7 +1300,8 @@
         if (!media) return;
         if (lastMedia !== media) {
           lastMedia = media;
-          media.addEventListener('pause', tick);
+          // 暂停拦截随媒体更换迁移：pause 被替换为空方法，无需“检测到暂停再自动播放”
+          PauseGuard.install(media, () => Session.isStopped() || media.ended || Player.isNearEnd(media) || !shouldResume());
         }
         // 记录原值，停止刷课时还原
         PageRestore.snapshotMedia(media);
@@ -1270,9 +1315,6 @@
         if (rateConf.keepAliveEnabled && rateConf.directSetEnabled) {
           media.playbackRate = rateConf.targetRate;
         }
-        if (media.paused && !media.ended && !Player.isNearEnd(media)) {
-          media.play().catch(() => { });
-        }
       };
       const timer = setInterval(tick, 500);
       document.addEventListener('visibilitychange', tick);
@@ -1280,7 +1322,7 @@
       tick();
       return () => {
         clearInterval(timer);
-        if (lastMedia) lastMedia.removeEventListener('pause', tick);
+        if (lastMedia) PauseGuard.uninstall(lastMedia);
         document.removeEventListener('visibilitychange', tick);
         window.removeEventListener('focus', tick);
       };
@@ -1890,7 +1932,7 @@ ${ocrText}
       if (isDeadline) this.panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
       Player.applySpeed();
       Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
+      const stopObserve = Player.blockPause(document.querySelector('video'));
       await Utils.poll(() => {
         Utils.dismissPopups();
         return isDeadline || Utils.isProgressDone(progressNode?.innerHTML);
@@ -1988,7 +2030,7 @@ ${ocrText}
       await Utils.sleep(2500);
       Player.applySpeed();
       Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
+      const stopObserve = Player.blockPause(document.querySelector('video'));
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       await Utils.poll(() => {
         Utils.dismissPopups();
@@ -2225,7 +2267,7 @@ ${ocrText}
             Player.applySpeed();
             Player.mute();
             boundVideo = video;
-            stopObserve = Player.observePause(video);
+            stopObserve = Player.blockPause(video);
           }
           const times = display.innerText || '';
           const [nowTime, totalTime] = times.split(' / ');
@@ -2365,7 +2407,7 @@ ${ocrText}
                   if (Session.isStopped()) return;
                   Player.applySpeed();
                   Player.mute();
-                  Player.observePause(video);
+                  Player.blockPause(video); // 不接管清理：暂停拦截随页面持续生效，跨集数不中断
                 }, 2000);
                 clearInterval(videoTimer);
                 videoTimer = null;
@@ -2508,7 +2550,7 @@ ${ocrText}
       if (media.tagName.toLowerCase() === 'video') {
         Player.applySpeed(media);
         Player.mute();
-        stopObserve = Player.observePause(media, shouldResume);
+        stopObserve = Player.blockPause(media, shouldResume);
       } else {
         Player.applyMediaDefault(media);
       }
