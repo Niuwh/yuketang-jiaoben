@@ -43,22 +43,22 @@ UI 面板实例 `panel` 为全局单例，各模块直接引用，不逐层传�
 ### AI 答题（Solver）
 
 - `resolveAnswerMode`：按 OCR 开关选择 ocr（截图经 Tesseract 识别）或 vision（截图直传多模态）路径。
-- `capture`/`recognize`/`toImagePayload`/`prepareQuestion`：html2canvas 截图、OCR 识别、截图压缩为 JPEG 负载、按模式产出题目输入。
+- `capture`/`recognize`/`toImagePayload`/`prepareQuestion`：html2canvas 按元素尺寸动态缩放截图、复用单个 Tesseract worker 做 OCR、截图压缩为 JPEG 负载、按模式产出题目输入。
 - `buildTextPrompt`/`buildVisionPrompt`：两种答题提示词。
 - `askAI`：`GM_xmlhttpRequest` 调用 OpenAI/Anthropic 格式接口（bearer/x-api-key 鉴权）。
-- `autoSelectAndSubmit`：解析"正确答案："格式的响应并勾选、提交。
+- `autoSelectAndSubmit`：解析"正确答案："格式的响应，复用调用方传入的选项元素勾选、补发 `change` 事件（兼容站点恢复草稿勾选态但不记录答案）并提交；点选项/提交之间用 `Utils.humanClick` 加入随机延迟错开动作，返回 `{ selected, submitted, fingerprint }`（提交前指纹用于判断页面是否自动切题）。
 
 ### 页面流程（三个 Runner）
 
 - `V2Runner`（*/v2/web/*）：目录列表逐项处理——视频（`handleVideo`）、批量区（`handleBatch` → `playMediaItem`/`autoCommentItem`/`handleHomework`）、课堂（`handleClassroom`）、课件与 PPT（`handleCourseware` + `waitCoursewareVideo`）；`checkCompletionStatus` 判完成，`updateProgress` 维护进度缓存。
 - `ProNewRunner` / `ProOldRunner`（*/pro/lms/*）：逐集播放（视频/图文/讨论/作业分流），ProOld 仅点击条目转发到新标签页。
-- `AiWorkspaceRunner`（*/ai-workspace/lms-graph/*）：按 `AiWorkspace.getRoute` 路由处理视频/音频（`handleMedia`）与作业（`handleExercise` → `solveExerciseQuestion`/`advanceExerciseQuestion`）；`autoSelect`/`handleNext` 推进任务点，`returnToSource` 返回课程目录窗口继续。
+- `AiWorkspaceRunner`（*/ai-workspace/lms-graph/*）：按 `AiWorkspace.getRoute` 路由处理视频/音频（`handleMedia`）与作业（`handleExercise` → `solveExerciseQuestion`，提交后只等页面自动切题并渲染稳定（`waitNextQuestion`），不点击下一题/题号；当前题已完成时才用 `openNextUnansweredTab` 单击一次下一个未作答题号）；`autoSelect`/`handleNext` 推进任务点，`returnToSource` 返回课程目录窗口继续。
 - `haltIfNoAutoSwitch`：受"自动切换下一个任务点/切换界面"开关控制，关闭时停在当前页面并清除跨页续跑标记。
 
 ### 公共工具
 
 - `Utils`：`sleep`/`poll`/`safeJSONParse`/`isProgressDone`/`getCurrentClassroomId`/`returnUrl`/`isSupportedLearningPage`/`waitForMountTarget`/`getDDL`/`dismissPopups`。
-- `AiWorkspace`：路由解析（`getRoute`）、媒体选取（`getMedia`）、播放完成判定（`isPlayerDone`）、作业定位（`getExerciseContainer`/`getExerciseQuestionBody`/`getExerciseQuestionTabs`/`isExerciseAnswered`/`getExerciseActionButton`）、可见性与文本规范化（`isVisibleElement`/`normalizeText`）。
+- `AiWorkspace`：路由解析（`getRoute`）、媒体选取（`getMedia`）、播放完成判定（`isPlayerDone`）、作业定位（`getExerciseContainer`/`getExerciseQuestionBody`/`getExerciseQuestionTabs`/`isExerciseAnswered`/`getExerciseOptions`/`getExerciseFingerprint`/`confirmSubmitDialog`）、可见性与文本规范化（`isVisibleElement`/`normalizeText`）。
 - `Player`：`isNearEnd`/`mute`/`waitForEnd`。
 
 ### 启动与会话控制（boot、start、stopBrushing）

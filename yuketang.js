@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.1.2
+// @version      3.1.3
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.1.2',     // 版本号
+    version: '3.1.3',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -48,6 +48,17 @@
   const Utils = {
     // 短暂睡眠，等待网页加载
     sleep: (ms = 1000) => new Promise(resolve => setTimeout(resolve, ms)),
+    // 模拟一次带间隔的鼠标点击：按下/抬起/点击错开几十毫秒，降低连续合成动作触发风控的概率
+    async humanClick(element) {
+      if (!element) return;
+      const view = element.ownerDocument?.defaultView || window;
+      const mouse = type => element.dispatchEvent(new view.MouseEvent(type, { bubbles: true, cancelable: true, view }));
+      mouse('mousedown');
+      await this.sleep(40 + Math.random() * 60);
+      mouse('mouseup');
+      await this.sleep(40 + Math.random() * 80);
+      element.click();
+    },
     // 将一个 JSON 字符串解析为 JavaScript 对象
     safeJSONParse(value, fallback) {
       try {
@@ -768,26 +779,21 @@
       window.parent.alert('作者：niuwh.cn（重构版 by Codex）');
     });
 
-    const log = message => {
+    // 日志节点上限：长时间刷课时避免面板 DOM 无限增长拖慢渲染
+    const MAX_LOG_ITEMS = 200;
+    const appendLog = text => {
       const li = doc.createElement('li');
-      li.innerText = message;
+      li.innerText = text;
       ui.info.appendChild(li);
+      while (ui.info.childElementCount > MAX_LOG_ITEMS) {
+        ui.info.firstElementChild.remove();
+      }
       if (ui.info.lastElementChild) ui.info.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end', inline: 'nearest' });
     };
 
-    const warn = message => {
-      const li = doc.createElement('li');
-      li.innerText = '⚠️警告：' + message;
-      ui.info.appendChild(li);
-      if (ui.info.lastElementChild) ui.info.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end', inline: 'nearest' });
-    };
-
-    const error = message => {
-      const li = doc.createElement('li');
-      li.innerText = '🚨报错：' + message;
-      ui.info.appendChild(li);
-      if (ui.info.lastElementChild) ui.info.lastElementChild.scrollIntoView({ behavior: 'smooth', block: 'end', inline: 'nearest' });
-    };
+    const log = message => appendLog(message);
+    const warn = message => appendLog('⚠️警告：' + message);
+    const error = message => appendLog('🚨报错：' + message);
 
     const defaultAI = { url: 'https://api.deepseek.com/chat/completions', key: 'sk-xxxxxxx', model: 'deepseek-chat', apiFormat: 'openai', authMethod: 'bearer' };
     const loadAIConf = () => {
@@ -1328,22 +1334,23 @@
     },
     getExerciseQuestionTabs(root = this.getExerciseContainer()) {
       if (!root) return [];
-      const selectors = [
-        '.subject-item.J_order',
-        '.subject-item',
-        '.problem-index-item',
-        '.question-index-item',
-        '[class*="subject-item"]',
-        '[class*="problem-index"]',
-        '[class*="question-index"]'
-      ].join(',');
-      const all = [...root.querySelectorAll(selectors)];
-      return all.filter((el, index, arr) => {
-        if (!this.isVisibleElement(el)) return false;
-        if (arr.indexOf(el) !== index) return false;
-        const text = this.normalizeText(el.innerText);
-        return text && text.length <= 20;
-      });
+      // 题号列表在作业容器外的侧栏（.problems-aside）里，需要向上找到 .container-body 再查
+      const scope = root.closest?.('.container-body') || root.closest?.('.problem-box') || root;
+      const collect = selector => {
+        const all = [...scope.querySelectorAll(selector)]
+          .filter((el, index, arr) => arr.indexOf(el) === index && this.isVisibleElement(el));
+        // 排除包含其它候选的容器节点，避免把整块题目区当成一个“题号”
+        const tabs = all.filter(el => !all.some(other => other !== el && el.contains(other)));
+        return tabs.filter(el => {
+          const text = this.normalizeText(el.innerText);
+          // 作答后题号文案可能追加“已完成/回答正确”等状态，限制放宽到 40 字
+          return text && text.length <= 40;
+        });
+      };
+      // 精确选择器优先；命中即返回，避免把题目正文的 .subject-item 误当成题号
+      const precise = collect('.subject-item.J_order, .problem-index-item, .question-index-item');
+      if (precise.length) return precise;
+      return collect('[class*="subject-item"], [class*="problem-index"], [class*="question-index"]');
     },
     getExerciseQuestionBody(root = this.getExerciseContainer()) {
       if (!root) return null;
@@ -1367,11 +1374,21 @@
       }
       return root;
     },
+    // 已作答判定：只看明确的“已提交”禁用态与状态文本。
+    // 不再用裸 button[disabled] 兜底——未选选项时被禁用的“提交”按钮会把整道题误判成已完成
     isExerciseAnswered(root = this.getExerciseContainer()) {
       if (!root) return false;
-      const disabled = root.querySelector('.el-button.el-button--info.is-disabled.is-plain')
-        || root.querySelector('button[disabled]');
-      if (disabled) return true;
+      const disabled = root.querySelector('.el-button.el-button--info.is-disabled.is-plain');
+      if (disabled && this.isVisibleElement(disabled)) return true;
+      // 已提交/已作答的按钮文案也算完成，比裸 button[disabled] 精确，不受“未选选项时提交按钮禁用”影响
+      const buttons = [...root.querySelectorAll('button, .el-button')];
+      const answeredBtn = buttons.find(el => /已提交|已作答|已完成/.test(this.normalizeText(el.innerText || '')));
+      if (answeredBtn) return true;
+      // 通用兜底：提交按钮被禁用且已有选项被勾选，说明本题已提交（未选选项时提交按钮即使禁用也不误判）
+      const checked = root.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked, .el-radio.is-checked, .el-checkbox.is-checked, [role="radio"][aria-checked="true"], [role="checkbox"][aria-checked="true"]');
+      const disabledSubmit = buttons.find(el => /提交|保存/.test(this.normalizeText(el.innerText || ''))
+        && (el.disabled || /is-disabled/.test(el.className || '')));
+      if (checked && disabledSubmit) return true;
       const statusSelectors = [
         '.result',
         '.status',
@@ -1386,14 +1403,49 @@
       }
       return false;
     },
-    getExerciseActionButton(root = this.getExerciseContainer(), pattern = /提交|保存|确认|确定|下一题|下一道|下一步|完成本题/) {
-      if (!root) return null;
-      const selectors = 'button, .el-button, [role="button"], [class*="button"]';
-      const nodes = [
-        ...root.querySelectorAll(selectors),
-        ...document.querySelectorAll(selectors)
-      ];
-      return nodes.find(el => this.isVisibleElement(el) && pattern.test(this.normalizeText(el.innerText)));
+    // 选项元素：题干内按优先级定位一次，选项计数与点选复用同一批元素，避免重复扫描 DOM
+    getExerciseOptions(root = this.getExerciseContainer()) {
+      if (!root) return [];
+      const listContainer = root.querySelector('.list-inline.list-unstyled-radio')
+        || root.querySelector('.list-unstyled.list-unstyled-radio')
+        || root.querySelector('.list-unstyled')
+        || root.querySelector('ul.list')
+        || root.querySelector('[class*="option-list"]')
+        || root.querySelector('[class*="answer-list"]')
+        || root.querySelector('ul')
+        || root.querySelector('[role="radiogroup"]');
+      if (!listContainer) return [];
+      return [...listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]')];
+    },
+    // 题目指纹：题干全文。用全文而不是前缀，避免共用同一段材料的题目前缀相同导致切题判断失效；
+    // 同时剔除“已提交/回答正确/正确答案：A”这类作答状态文案，避免它们被误判成切换了题目
+    getExerciseFingerprint(root = this.getExerciseContainer()) {
+      const questionRoot = this.getExerciseQuestionBody(root);
+      const text = this.normalizeText(questionRoot?.innerText || '');
+      return text
+        .replace(/已提交|已作答|已完成|回答正确|回答错误/g, '')
+        .replace(/(?:正确答案|你的答案)[：:]?\s*[A-Fa-f、,，\s]*/g, '')
+        .trim();
+    },
+    // 提交后的二次确认弹窗：仅在弹窗文本包含“提交”时点确定，避免误点其它弹窗
+    confirmSubmitDialog(root = this.getExerciseContainer()) {
+      const docs = [document];
+      const ownerDoc = root?.ownerDocument;
+      if (ownerDoc && ownerDoc !== document) docs.push(ownerDoc);
+      for (const doc of docs) {
+        const boxes = doc.querySelectorAll('.el-message-box__wrapper, .el-dialog__wrapper');
+        for (const box of boxes) {
+          if (!this.isVisibleElement(box)) continue;
+          if (!this.normalizeText(box.innerText || '').includes('提交')) continue;
+          const confirmBtn = [...box.querySelectorAll('button')]
+            .find(btn => this.isVisibleElement(btn) && /^(确定|确认|提交|好的)/.test(this.normalizeText(btn.innerText || '')));
+          if (confirmBtn) {
+            confirmBtn.click();
+            return true;
+          }
+        }
+      }
+      return false;
     }
   };
 
@@ -1445,31 +1497,78 @@
     resolveAnswerMode() {
       return Store.getFeatureConf().useOCR ? 'ocr' : 'vision';
     },
-    // 两条路径共用的截图逻辑
-    async capture(element) {
+    // 两条路径共用的截图逻辑：按元素尺寸动态选缩放（最长边不超过 maxSide）。
+    // 固定 2 倍渲染整块题目 DOM 会在长题目上产生巨大的 canvas，造成明显卡顿
+    async capture(element, maxSide = 1600) {
       panel.log('正在截图...');
+      const rect = element.getBoundingClientRect();
+      const longest = Math.max(rect.width, rect.height, 1);
+      const scale = Math.min(2, Math.max(1, maxSide / longest));
       return html2canvas(element, {
         useCORS: true,
         logging: false,
-        scale: 2,
+        scale,
         backgroundColor: '#ffffff'
       });
+    },
+    // OCR worker 复用：Tesseract.recognize 每次调用都会新建 worker 并重新初始化语言包，
+    // 连续作答时反复初始化 wasm 非常耗 CPU；这里惰性创建一次并复用
+    ocrWorker: null,
+    ocrWorkerPromise: null,
+    ensureOcrWorker() {
+      if (this.ocrWorker) return Promise.resolve(this.ocrWorker);
+      if (this.ocrWorkerPromise) return this.ocrWorkerPromise;
+      if (typeof Tesseract === 'undefined' || typeof Tesseract.createWorker !== 'function') {
+        return Promise.resolve(null);
+      }
+      const logger = m => {
+        if (m.status === 'downloading tesseract lang') {
+          console.log(`正在下载语言包 ${(m.progress * 100).toFixed(0)}%`);
+        }
+      };
+      this.ocrWorkerPromise = (async () => {
+        const worker = Tesseract.createWorker({ logger });
+        await worker.load();
+        await worker.loadLanguage('chi_sim');
+        await worker.initialize('chi_sim');
+        this.ocrWorker = worker;
+        return worker;
+      })().catch(err => {
+        console.error('OCR worker 初始化失败，回退到单次识别:', err);
+        this.ocrWorkerPromise = null;
+        return null;
+      });
+      return this.ocrWorkerPromise;
+    },
+    resetOcrWorker() {
+      const worker = this.ocrWorker;
+      this.ocrWorker = null;
+      this.ocrWorkerPromise = null;
+      if (!worker) return;
+      try {
+        worker.terminate();
+      } catch (_) { }
     },
     async recognize(element) {
       if (!element) return '无元素';
       try {
         const canvas = await this.capture(element);
-        panel.log('正在 OCR 识别 (首轮较慢)...');
-        const { data: { text } } = await Tesseract.recognize(canvas, 'chi_sim', {
-          logger: m => {
-            if (m.status === 'downloading tesseract lang') {
-              console.log(`正在下载语言包 ${(m.progress * 100).toFixed(0)}%`);
+        const worker = await this.ensureOcrWorker();
+        panel.log(worker ? '正在 OCR 识别...' : '正在 OCR 识别 (首轮较慢)...');
+        const result = worker
+          ? await worker.recognize(canvas)
+          : await Tesseract.recognize(canvas, 'chi_sim', {
+            logger: m => {
+              if (m.status === 'downloading tesseract lang') {
+                console.log(`正在下载语言包 ${(m.progress * 100).toFixed(0)}%`);
+              }
             }
-          }
-        });
-        return text.replace(/\s+/g, ' ').trim();
+          });
+        return String(result?.data?.text || '').replace(/\s+/g, ' ').trim();
       } catch (err) {
         console.error('OCR error:', err);
+        // worker 可能已崩溃：丢弃它，下次重新创建
+        this.resetOcrWorker();
         panel.log(`OCR 失败: ${err.message || '网络错误'}`);
         return 'OCR识别出错';
       }
@@ -1495,7 +1594,8 @@
       if (!element) return null;
       if (mode === 'vision') {
         try {
-          const canvas = await this.capture(element);
+          // 与 toImagePayload 的最长边限制保持一致，避免先渲染大图再缩小
+          const canvas = await this.capture(element, 1568);
           return this.toImagePayload(canvas);
         } catch (err) {
           console.error('Screenshot error:', err);
@@ -1504,7 +1604,7 @@
         }
       }
       const text = await this.recognize(element);
-      return (text && text.length > 5) ? text : null;
+      return (text && text !== 'OCR识别出错' && text.length > 5) ? text : null;
     },
     // OCR 文本路径提示词
     buildTextPrompt(ocrText, optionCount) {
@@ -1656,13 +1756,18 @@ ${ocrText}
         }
       });
     },
-    async autoSelectAndSubmit(aiResponse, itemBodyElement) {
-      const match = aiResponse.match(/(?:正确)?答案[：:]?\s*([A-F]+(?:[,，][A-F]+)*|[对错]|正确|错误)/i);
+    // 返回 { selected, submitted, fingerprint }：
+    // selected 是否点选了选项，submitted 是否点到可用的提交按钮，
+    // fingerprint 为“选完选项、点击提交之前”的题目指纹，供调用方判断页面是否自动切题
+    async autoSelectAndSubmit(aiResponse, itemBodyElement, options = null) {
+      const responseText = String(aiResponse || '');
+      // 兼容“正确答案：A”“正确答案是 A”“答案：A、B”等常见写法
+      const match = responseText.match(/(?:正确|参考)?答案(?:[：:]|为|是)?\s*([A-Fa-f]+(?:[\s,，、]*[A-Fa-f]+)*|[对错]|正确|错误)/);
       if (!match) {
         panel.log('⚠️ 未提取到有效选项，请人工检查');
-        return;
+        return { selected: false, submitted: false, fingerprint: '' };
       }
-      let answerRaw = match[1].replace(/[,，]/g, '').trim();
+      let answerRaw = match[1].replace(/[\s,，、]/g, '').trim();
       const map = { 'A': 0, 'B': 1, 'C': 2, 'D': 3, 'E': 4, 'F': 5 };
       let targetIndices = [];
       if (answerRaw === '对' || answerRaw === '正确') {
@@ -1674,35 +1779,60 @@ ${ocrText}
           if (map[char] !== undefined) targetIndices.push(map[char]);
         }
       }
-      if (!targetIndices.length) return;
+      if (!targetIndices.length) {
+        return { selected: false, submitted: false, fingerprint: '' };
+      }
       panel.log(`✅ AI 建议选：${answerRaw}`);
 
-      const listContainer = itemBodyElement.querySelector('.list-inline.list-unstyled-radio') ||
-        itemBodyElement.querySelector('.list-unstyled.list-unstyled-radio') ||
-        itemBodyElement.querySelector('.list-unstyled') ||
-        itemBodyElement.querySelector('ul.list') ||
-        itemBodyElement.querySelector('[class*="option-list"]') ||
-        itemBodyElement.querySelector('[class*="answer-list"]') ||
-        itemBodyElement.querySelector('ul') ||
-        itemBodyElement.querySelector('[role="radiogroup"]');
-      if (!listContainer) {
+      const optionEls = options?.length ? options : AiWorkspace.getExerciseOptions(itemBodyElement);
+      if (!optionEls.length) {
         panel.log('⚠️ 未找到选项容器');
-        return;
+        return { selected: false, submitted: false, fingerprint: '' };
       }
-      const options = listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]');
+      // 选项最终状态：先清理多选里残留的草稿选项，再逐个确保目标项被勾选。
+      // 站点会恢复草稿勾选态但不写答案，此时点击已勾选项不触发 change，需要补发 change 事件
+      const ownerDoc = itemBodyElement.ownerDocument || document;
+      const ViewEvent = ownerDoc.defaultView?.Event || Event;
+      const clickableOf = option => option.querySelector('label.el-radio') ||
+        option.querySelector('label.el-checkbox') ||
+        option.querySelector('.el-radio__label') ||
+        option.querySelector('.el-checkbox__label') ||
+        option.querySelector('[role="radio"]') ||
+        option.querySelector('[role="checkbox"]') ||
+        option.querySelector('input') ||
+        option;
+      const inputOf = option => option.querySelector('input[type="radio"], input[type="checkbox"]');
+      const isCheckedOption = option => {
+        const input = inputOf(option);
+        if (input) return input.checked;
+        const label = option.querySelector('label.el-radio, label.el-checkbox');
+        if (label) return /is-checked/.test(label.className || '');
+        return /is-checked/.test(option.className || '');
+      };
+      const applyOption = async (option, checked) => {
+        await Utils.humanClick(clickableOf(option));
+        await Utils.sleep(180 + Math.random() * 160);
+        const input = inputOf(option);
+        if (!input) return;
+        if (input.checked !== checked) input.checked = checked;
+        input.dispatchEvent(new ViewEvent('change', { bubbles: true }));
+        await Utils.sleep(80 + Math.random() * 80);
+      };
+      // 作答前停顿，避免“截图→点选项→提交”连成一条直线
+      await Utils.sleep(250 + Math.random() * 350);
+      const isMultiChoice = optionEls.some(option => option.querySelector('input[type="checkbox"], label.el-checkbox'));
+      if (isMultiChoice) {
+        for (let i = 0; i < optionEls.length; i++) {
+          if (!targetIndices.includes(i) && isCheckedOption(optionEls[i])) {
+            await applyOption(optionEls[i], false);
+          }
+        }
+      }
       for (const idx of targetIndices) {
-        if (!options[idx]) continue;
-        const clickable = options[idx].querySelector('label.el-radio') ||
-          options[idx].querySelector('label.el-checkbox') ||
-          options[idx].querySelector('.el-radio__label') ||
-          options[idx].querySelector('.el-checkbox__label') ||
-          options[idx].querySelector('[role="radio"]') ||
-          options[idx].querySelector('[role="checkbox"]') ||
-          options[idx].querySelector('input') ||
-          options[idx];
-        clickable.click();
-        await Utils.sleep(150);
+        const option = optionEls[idx];
+        if (option) await applyOption(option, true);
       }
+      const isDisabled = btn => btn.disabled || /is-disabled|is-loading/.test(btn.className || '');
       const submitBtn = (() => {
         const ownerDocument = itemBodyElement.ownerDocument || document;
         const roots = [itemBodyElement.parentElement, itemBodyElement, ownerDocument].filter(Boolean);
@@ -1710,21 +1840,25 @@ ${ocrText}
         for (const root of roots) {
           const local = root.querySelectorAll('button, .el-button, [role="button"]');
           for (const btn of local) {
-            if (btn.offsetParent !== null && matchText(btn.innerText || '')) return btn;
+            if (btn.offsetParent !== null && !isDisabled(btn) && matchText(btn.innerText || '')) return btn;
           }
         }
         const global = ownerDocument.querySelectorAll('.el-button.el-button--primary.el-button--medium');
         for (const btn of global) {
-          if (matchText(btn.innerText || '') && btn.offsetParent !== null) return btn;
+          if (matchText(btn.innerText || '') && btn.offsetParent !== null && !isDisabled(btn)) return btn;
         }
         return null;
       })();
-      if (submitBtn) {
-        panel.log('正在提交...');
-        submitBtn.click();
-      } else {
-        panel.log('⚠️ 未找到提交按钮，请手动提交');
+      // 提交前再停顿，和选项点击错开；停顿后再取指纹，把勾选后的异步文案变化一并算入基准
+      await Utils.sleep(400 + Math.random() * 400);
+      const fingerprint = AiWorkspace.getExerciseFingerprint();
+      if (!submitBtn) {
+        panel.log('⚠️ 未找到可用的提交按钮，请手动提交');
+        return { selected: true, submitted: false, fingerprint };
       }
+      panel.log('正在提交...');
+      await Utils.humanClick(submitBtn);
+      return { selected: true, submitted: true, fingerprint };
     }
   };
 
@@ -2112,7 +2246,8 @@ ${ocrText}
               }
               panel.log('🤖 请求 AI 获取答案...');
               const aiText = await Solver.askAI(questionInput, optionCount);
-              await Solver.autoSelectAndSubmit(aiText, targetEl);
+              const result = await Solver.autoSelectAndSubmit(aiText, targetEl);
+              if (!result.selected) throw new Error('未提取到有效答案');
               success = true;
             } catch (err) {
               retryCount++;
@@ -2531,68 +2666,127 @@ ${ocrText}
       return true;
     }
 
-    async solveExerciseQuestion(root, label = '') {
-      const questionRoot = AiWorkspace.getExerciseQuestionBody(root);
-      if (!questionRoot) {
-        panel.log('未找到题目容器，停止当前轮次');
-        return false;
-      }
-      if (AiWorkspace.isExerciseAnswered(questionRoot)) {
-        panel.log(`${label || '当前题目'} 已完成，跳过`);
-        return true;
-      }
-
-      const listContainer = questionRoot.querySelector('.list-inline.list-unstyled-radio')
-        || questionRoot.querySelector('.list-unstyled.list-unstyled-radio')
-        || questionRoot.querySelector('.list-unstyled')
-        || questionRoot.querySelector('ul.list')
-        || questionRoot.querySelector('[class*="option-list"]')
-        || questionRoot.querySelector('[class*="answer-list"]')
-        || questionRoot.querySelector('ul')
-        || questionRoot.querySelector('[role="radiogroup"]');
-      const optionCount = listContainer
-        ? listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]').length
-        : 0;
-      if (!optionCount) {
-        panel.log(`${label || '当前题目'} 未找到选项，跳过`);
-        return false;
-      }
-
-      const mode = Solver.resolveAnswerMode();
-      const questionInput = await Solver.prepareQuestion(questionRoot, mode);
-      if (!questionInput) {
-        panel.log(`${label || '当前题目'} ${mode === 'vision' ? '截图失败' : 'OCR 结果过短'}，跳过`);
-        return false;
-      }
-
-      const maxRetry = 3;
-      for (let retryCount = 0; retryCount < maxRetry; retryCount++) {
-        try {
-          if (retryCount > 0) panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
-          panel.log('🤖 请求 AI 获取答案...');
-          const aiText = await Solver.askAI(questionInput, optionCount);
-          await Solver.autoSelectAndSubmit(aiText, questionRoot);
-          await Utils.sleep(1200);
-          return true;
-        } catch (err) {
-          panel.log(`AI 答题失败：${err}`);
-          if (retryCount < maxRetry - 1) await Utils.sleep(5000);
+    // 提交后等待页面自动切到下一题并完成渲染：期间不点击任何切题按钮，避免重复切题触发风控
+    async waitNextQuestion(previousFingerprint, timeout = 15000) {
+      if (!previousFingerprint) return false;
+      let last = '';
+      return Utils.poll(() => {
+        AiWorkspace.confirmSubmitDialog();
+        const container = AiWorkspace.getExerciseContainer();
+        if (!container) {
+          last = '';
+          return false;
         }
-      }
-      return false;
+        const fingerprint = AiWorkspace.getExerciseFingerprint(container);
+        if (!fingerprint || fingerprint === previousFingerprint) {
+          last = '';
+          return false;
+        }
+        // 连续两次读数一致才认为新题已渲染完成，避免在题目还在切换时开始作答
+        const ready = fingerprint === last;
+        last = fingerprint;
+        return ready;
+      }, { interval: 500, timeout });
     }
 
-    async advanceExerciseQuestion(root, previousFingerprint = '') {
-      const currentRoot = AiWorkspace.getExerciseContainer() || root;
-      const nextBtn = AiWorkspace.getExerciseActionButton(currentRoot, /下一题|下一道|下一步/);
-      if (!nextBtn) return false;
-      nextBtn.click();
-      return Utils.poll(() => {
-        const latestRoot = AiWorkspace.getExerciseContainer() || currentRoot;
-        const questionRoot = AiWorkspace.getExerciseQuestionBody(latestRoot);
-        const fingerprint = AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
-        return fingerprint && fingerprint !== previousFingerprint;
-      }, { interval: 500, timeout: 5000 });
+    // 当前题已完成（例如中途开始刷课停在已答题）才单击一次下一个未作答题号；
+    // 正常提交后不调用这里，避免页面自动跳题后又多点一次
+    async openNextUnansweredTab(previousFingerprint) {
+      if (Session.isStopped()) return false;
+      const container = AiWorkspace.getExerciseContainer();
+      const tabs = AiWorkspace.getExerciseQuestionTabs(container);
+      if (!tabs.length) return false;
+      const isAnsweredTab = tab => /primary/.test(tab.className) || Boolean(tab.querySelector('.icon-status.success'));
+      const activeIndex = tabs.findIndex(tab => /active|current|selected|is-active/.test(tab.className));
+      const ordered = activeIndex >= 0
+        ? [...tabs.slice(activeIndex + 1), ...tabs.slice(0, activeIndex)]
+        : tabs;
+      const pending = ordered.find(tab => !isAnsweredTab(tab));
+      if (!pending) return false;
+      panel.log('当前题目已完成，切换到下一道未作答题目');
+      await Utils.sleep(300 + Math.random() * 300);
+      await Utils.humanClick(pending);
+      return this.waitNextQuestion(previousFingerprint, 15000);
+    }
+
+    async solveExerciseQuestion(root, label = '', { fingerprint = '', cache = null } = {}) {
+      let questionRoot = AiWorkspace.getExerciseQuestionBody(root);
+      if (!questionRoot) {
+        panel.log('未找到题目容器，停止当前轮次');
+        return { ok: false, submitted: false, skipped: false, aiFailed: false, fingerprint };
+      }
+      if (AiWorkspace.isExerciseAnswered(questionRoot.closest?.('.container-problem') || root)) {
+        panel.log(`${label || '当前题目'} 已完成，跳过`);
+        return { ok: true, submitted: false, skipped: true, aiFailed: false, fingerprint };
+      }
+
+      // 选项只定位一次：选项数量、点选都复用同一批元素
+      let options = AiWorkspace.getExerciseOptions(questionRoot);
+      if (!options.length) {
+        // 刚切到新题时选项可能仍在渲染，短暂等待后重新取样，避免把渲染中的题目当成“无选项”跳过
+        await Utils.poll(() => {
+          const latestRoot = AiWorkspace.getExerciseContainer() || root;
+          return AiWorkspace.getExerciseOptions(AiWorkspace.getExerciseQuestionBody(latestRoot)).length > 0;
+        }, { interval: 300, timeout: 2000 });
+        if (Session.isStopped()) {
+          return { ok: false, submitted: false, skipped: false, aiFailed: false, fingerprint };
+        }
+        const latestRoot = AiWorkspace.getExerciseContainer() || root;
+        questionRoot = AiWorkspace.getExerciseQuestionBody(latestRoot) || questionRoot;
+        options = AiWorkspace.getExerciseOptions(questionRoot);
+      }
+      if (!options.length) {
+        panel.log(`${label || '当前题目'} 未找到选项，跳过`);
+        return { ok: false, submitted: false, skipped: true, aiFailed: false, fingerprint };
+      }
+
+      const cacheKey = AiWorkspace.normalizeText(questionRoot.innerText || '') || fingerprint;
+      let aiText = cache?.get(cacheKey) || '';
+      if (aiText) {
+        panel.log(`${label || '当前题目'} 命中答案缓存，跳过 AI 请求`);
+      } else {
+        const mode = Solver.resolveAnswerMode();
+        const questionInput = await Solver.prepareQuestion(questionRoot, mode);
+        if (!questionInput) {
+          panel.log(`${label || '当前题目'} ${mode === 'vision' ? '截图失败' : 'OCR 结果过短'}，跳过`);
+          return { ok: false, submitted: false, skipped: true, aiFailed: false, fingerprint };
+        }
+
+        const maxRetry = 3;
+        for (let retryCount = 0; retryCount < maxRetry && !aiText; retryCount++) {
+          try {
+            if (retryCount > 0) panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
+            panel.log('🤖 请求 AI 获取答案...');
+            aiText = await Solver.askAI(questionInput, options.length);
+          } catch (err) {
+            panel.log(`AI 答题失败：${err}`);
+            if (retryCount < maxRetry - 1) await Utils.sleep(3000);
+          }
+        }
+        if (!aiText) {
+          panel.log(`⚠️ ${label || '当前题目'} 未获取到答案，跳过`);
+          return { ok: false, submitted: false, skipped: false, aiFailed: true, fingerprint };
+        }
+        cache?.set(cacheKey, aiText);
+      }
+      if (Session.isStopped()) {
+        return { ok: false, submitted: false, skipped: false, aiFailed: false, fingerprint };
+      }
+
+      const result = await Solver.autoSelectAndSubmit(aiText, questionRoot, options);
+      if (!result.selected) {
+        // 无法把答案映射到选项：清掉缓存，避免下次仍用同一份无效答案
+        cache?.delete(cacheKey);
+        panel.log(`⚠️ ${label || '当前题目'} 未能匹配选项，跳过`);
+        return { ok: false, submitted: false, skipped: false, aiFailed: true, fingerprint };
+      }
+      return {
+        ok: true,
+        submitted: result.submitted,
+        skipped: false,
+        aiFailed: false,
+        fingerprint: result.fingerprint || fingerprint
+      };
     }
 
     async handleExercise(route) {
@@ -2601,46 +2795,72 @@ ${ocrText}
         panel.log('已关闭 AI 自动答题，作业将直接跳过');
         return true;
       }
+      // 未配置有效 Key 时直接跳过，避免每题都截图/OCR 后才发现请求必然失败
+      const aiConf = Store.getAIConf();
+      if (!aiConf.key || aiConf.key.includes('sk-xxxx')) {
+        panel.log('⚠️ 未配置有效的 API Key，本次作业跳过自动作答');
+        return true;
+      }
 
       const ready = await Utils.poll(() => Boolean(AiWorkspace.getExerciseContainer()), { interval: 500, timeout: 20000 });
       if (Session.isStopped()) return true;
-      const root = AiWorkspace.getExerciseContainer();
-      if (!ready || !root) {
+      if (!ready) {
         panel.log('未找到作业容器，停止当前轮次');
         return false;
       }
 
       panel.log(`开始处理作业：${AiWorkspace.getActiveLeafTitle() || route.leafId}`);
-      const tabs = AiWorkspace.getExerciseQuestionTabs(root);
-      if (tabs.length) {
-        panel.log(`检测到题目索引 ${tabs.length} 个，按题号顺序作答`);
-        for (let i = 0; i < tabs.length; i++) {
-          if (Session.isStopped()) return true;
-          const currentRoot = AiWorkspace.getExerciseContainer() || root;
-          const currentTabs = AiWorkspace.getExerciseQuestionTabs(currentRoot);
-          const currentTab = currentTabs[i];
-          if (!currentTab) break;
-          currentTab.click();
-          await Utils.sleep(1200);
-          await this.solveExerciseQuestion(AiWorkspace.getExerciseContainer() || currentRoot, `第 ${i + 1} 题`);
-        }
-        return true;
-      }
+      // 本次作业内的答案缓存：页面回退或重新进入同一题时不再重复请求 AI
+      const answerCache = new Map();
+      const processed = new Set();
+      const maxQuestions = 100; // 防御题号不变化的异常页面导致无限作答
+      let currentIndex = 0;
 
-      panel.log('未找到题号列表，尝试只处理当前题并按下一题推进');
-      let previousFingerprint = '';
-      for (let i = 0; i < 20; i++) {
+      for (let i = 0; i < maxQuestions; i++) {
         if (Session.isStopped()) return true;
-        const currentRoot = AiWorkspace.getExerciseContainer() || root;
-        const questionRoot = AiWorkspace.getExerciseQuestionBody(currentRoot);
-        const fingerprint = AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
+        const currentRoot = AiWorkspace.getExerciseContainer();
+        if (!currentRoot) break;
+        const fingerprint = AiWorkspace.getExerciseFingerprint(currentRoot);
         if (!fingerprint) break;
-        if (i > 0 && fingerprint === previousFingerprint) break;
-        const activeTab = AiWorkspace.getExerciseQuestionTabs(currentRoot).find(tab => /active|current|selected|is-active/.test(tab.className));
-        await this.solveExerciseQuestion(currentRoot, AiWorkspace.normalizeText(activeTab?.innerText || '') || `第 ${i + 1} 题`);
-        previousFingerprint = fingerprint;
-        const moved = await this.advanceExerciseQuestion(currentRoot, fingerprint);
-        if (!moved) break;
+        if (processed.has(fingerprint)) {
+          panel.log('题目内容未再变化，作业处理结束');
+          break;
+        }
+
+        const tabs = AiWorkspace.getExerciseQuestionTabs(currentRoot);
+        if (i === 0 && tabs.length) panel.log(`检测到题目索引 ${tabs.length} 个`);
+        const activeIndex = tabs.findIndex(tab => /active|current|selected|is-active/.test(tab.className));
+        if (activeIndex >= 0) currentIndex = activeIndex;
+        const activeTab = tabs[currentIndex];
+        const label = AiWorkspace.normalizeText(activeTab?.innerText || '') || `第 ${currentIndex + 1} 题`;
+
+        const result = await this.solveExerciseQuestion(currentRoot, label, { fingerprint, cache: answerCache });
+        if (Session.isStopped()) return true;
+        processed.add(fingerprint);
+
+        const baseline = result.fingerprint || fingerprint;
+        if (result.submitted) {
+          // 站点提交成功后会自动切到下一题：这里只等待新题加载完成，不再点任何切题按钮
+          if (await this.waitNextQuestion(baseline, 15000)) {
+            panel.log('页面已自动切换到下一题');
+            if (activeIndex < 0 && tabs.length) currentIndex += 1;
+            continue;
+          }
+          if (Session.isStopped()) return true;
+          panel.log('提交后未检测到页面自动切题，已停止继续作答以避免重复切题');
+          break;
+        }
+        if (result.skipped) {
+          // 当前题已完成或不是可作答题型：单击一次下一道未作答题号继续
+          if (await this.openNextUnansweredTab(baseline)) {
+            if (activeIndex < 0 && tabs.length) currentIndex += 1;
+            continue;
+          }
+          panel.log('没有可继续作答的题目，作业处理结束');
+          break;
+        }
+        panel.log('本题未提交成功，已停止继续作答以避免重复切题');
+        break;
       }
       return true;
     }
@@ -2696,6 +2916,8 @@ ${ocrText}
     Store.clearPendingAutoStart();
     const restoreOnStop = Store.getFlowConf().restoreOnStop;
     if (restoreOnStop) PageRestore.restoreAll();
+    // 释放复用的 OCR worker，避免停止后仍占用 wasm 线程与内存
+    Solver.resetOcrWorker();
     panel.resetStartButton('开始刷课');
     panel.log(restoreOnStop
       ? '已停止刷课：对页面/播放器的修改已还原；重新加载后不会自动恢复，点击[开始刷课]可重新启动'
