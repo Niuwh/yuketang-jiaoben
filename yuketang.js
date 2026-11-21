@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         雨课堂刷课助手
 // @namespace    http://tampermonkey.net/
-// @version      3.0.6
+// @version      3.2.0
 // @description  针对雨课堂视频进行自动播放，配置AI自动答题
 // @author       风之子
 // @license      GPL3
@@ -30,7 +30,7 @@
 
   // ---- 脚本配置，用户可修改 ----
   const Config = {
-    version: '3.0.6',     // 版本号
+    version: '3.2.0',     // 版本号
     playbackRate: 2,      // 视频播放倍速
     pptInterval: 3000,    // ppt翻页间隔
     storageKeys: {        // 使用者勿动
@@ -38,7 +38,10 @@
       ai: 'ykt_ai_conf',
       proClassCount: 'pro_lms_classCount',
       feature: 'ykt_feature_conf', // 是否开启AI作答/自动评论
-      pendingAutoStart: 'ykt_pending_auto_start'
+      rate: 'ykt_rate_conf', // 视频倍速配置：目标倍速与各解锁限制修改点开关
+      flow: 'ykt_flow_conf', // 刷课流程配置：自动切换任务点/界面、停止后还原修改
+      pendingAutoStart: 'ykt_pending_auto_start',
+      userStopped: 'ykt_user_stopped' // 用户已点击停止刷课（持久化，防止重新加载后自动恢复）
     }
   };
 
@@ -58,6 +61,12 @@
       return new Promise(resolve => {
         const start = Date.now();
         const timer = setInterval(() => {
+          // 停止刷课后立即中止所有轮询，让流程尽快收尾
+          if (Session.isStopped()) {
+            clearInterval(timer);
+            resolve(false);
+            return;
+          }
           if (checker()) {
             clearInterval(timer);
             resolve(true);
@@ -74,15 +83,6 @@
     isProgressDone(text) {
       if (!text) return false;
       return text.includes('100%') || text.includes('99%') || text.includes('98%') || text.includes('已完成');
-    },
-    // 主要是规避firefox会创建多个iframe的问题
-    inIframe() {
-      return window.top !== window.self;
-    },
-    // 下滑到最底部，触发课程加载
-    scrollToBottom(containerSelector) {
-      const el = document.querySelector(containerSelector);
-      if (el) el.scrollTop = el.scrollHeight;
     },
     getCurrentClassroomId() {
       const query = new URLSearchParams(location.search);
@@ -220,12 +220,40 @@
       const conf = {
         autoAI: saved.autoAI ?? false,
         autoComment: saved.autoComment ?? false,
+        useOCR: saved.useOCR ?? true, // 是否启用 OCR 识题（关闭后截图直传多模态模型）
       };
       localStorage.setItem(Config.storageKeys.feature, JSON.stringify(conf));
       return conf;
     },
     setFeatureConf(conf) {
       localStorage.setItem(Config.storageKeys.feature, JSON.stringify(conf));
+    },
+    getRateConf() {
+      const raw = localStorage.getItem(Config.storageKeys.rate);
+      const saved = Utils.safeJSONParse(raw, {}) || {};
+      // 目标倍速钳制到 1-16（与倍速迁移说明一致）；缺失、非法或非正值回退默认值
+      const num = Number(saved.targetRate);
+      const targetRate = Number.isFinite(num) && num > 0 ? Math.min(16, Math.max(1, num)) : Config.playbackRate;
+      return {
+        targetRate,
+        buttonSetEnabled: saved.buttonSetEnabled ?? true,
+        directSetEnabled: saved.directSetEnabled ?? true,
+        keepAliveEnabled: saved.keepAliveEnabled ?? true,
+        ratechangeBlockEnabled: saved.ratechangeBlockEnabled ?? true,
+      };
+    },
+    setRateConf(conf) {
+      localStorage.setItem(Config.storageKeys.rate, JSON.stringify(conf));
+    },
+    getFlowConf() {
+      const saved = Utils.safeJSONParse(localStorage.getItem(Config.storageKeys.flow), {}) || {};
+      return {
+        autoSwitch: saved.autoSwitch ?? true,
+        restoreOnStop: saved.restoreOnStop ?? true,
+      };
+    },
+    setFlowConf(conf) {
+      localStorage.setItem(Config.storageKeys.flow, JSON.stringify(conf));
     },
     getPendingAutoStart() {
       const raw = localStorage.getItem(Config.storageKeys.pendingAutoStart);
@@ -249,6 +277,21 @@
     clearPendingAutoStart() {
       localStorage.removeItem(Config.storageKeys.pendingAutoStart);
     },
+  };
+
+  // ---- 刷课会话状态 ----
+  // 用户点击“停止刷课”后持久化停止标记：重新加载页面（含其它标签页）也不会自动恢复刷课，
+  // 只有再次点击“开始刷课”才会清除该状态。每次读取持久化值，保证多标签页之间状态一致。
+  const Session = {
+    isStopped() {
+      return localStorage.getItem(Config.storageKeys.userStopped) === '1';
+    },
+    begin() {
+      localStorage.removeItem(Config.storageKeys.userStopped);
+    },
+    stop() {
+      localStorage.setItem(Config.storageKeys.userStopped, '1');
+    }
   };
 
   // ---- UI 面板 ----
@@ -394,7 +437,8 @@
                 color: #333;
               }
               .form-item input[type="text"],
-              .form-item input[type="password"] {
+              .form-item input[type="password"],
+              .form-item input[type="number"] {
                 width: 100%;
                 padding: 8px;
                 border: 1px solid #ddd;
@@ -414,6 +458,14 @@
               .form-item .checkbox-label input[type="checkbox"] {
                 margin: 0;
                 width: auto;
+              }
+
+              /* 表单项提示文案 */
+              .form-item .hint {
+                margin-top: 4px;
+                font-size: 11px;
+                color: #999;
+                line-height: 1.5;
               }
 
               /* 底部按钮栏 */
@@ -503,7 +555,7 @@
                 <ul class="info" id="info">
                   <li>⭐ 脚本支持：雨课堂所有版本</li>
                   <li>🤖 <strong>支持模型：</strong>DeepSeek、Kimi(Moonshot)、通义千问、OpenAI、Claude(Anthropic)</li>
-                  <li>📢 <strong>使用必读：</strong>自动答题需先点击<span style="color:green">[AI配置]</span>开启并填入API Key</li>
+                  <li>📢 <strong>使用必读：</strong>自动答题需先点击<span style="color:green">[脚本设置]</span>开启并填入API Key</li>
                   <li>🚀 配置完成后，点击<span style="color:blue">[开始刷课]</span>即可启动视频与作业挂机</li>
                   <li>🤝 脚本还有很多不足，欢迎各位一起完善代码</li>
                   <hr>
@@ -521,6 +573,7 @@
                 <div class="form-item">
                   <label>Model Name:</label>
                   <input type="text" id="ai_model" placeholder="deepseek-chat">
+                  <div class="hint">提示：若模型支持图片输入（多模态/视觉，如 GPT-4o、Claude 3.5+、Qwen-VL），可关闭下方 OCR 开关，截图将直接发给模型识别</div>
                 </div>
                 <div class="form-item">
                   <label>API Format:</label>
@@ -544,9 +597,66 @@
                 </div>
                 <div class="form-item">
                   <label class="checkbox-label">
+                    <input type="checkbox" id="feature_use_ocr">
+                    启用 OCR 识别题目
+                  </label>
+                  <div class="hint">开启：截图经 OCR 识别后把文本发给模型（默认，所有模型可用）；关闭：截图直接发给多模态模型作答（请自行确认模型支持图片输入）</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
                     <input type="checkbox" id="feature_auto_comment">
                     用批量区图文/讨论自动回复
                   </label>
+                </div>
+                <div class="form-item">
+                  <label style="font-weight:bold;font-size:13px;">视频倍速</label>
+                  <input type="number" id="rate_target" min="1" max="16" step="0.5">
+                  <div class="hint">目标倍速，范围 1-16（超出自动钳制），设为 1 即原速播放</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="rate_button_set">
+                    速度按钮改写设速（当前实现）
+                  </label>
+                  <div class="hint">改写播放器速度按钮并点击来设速；关闭后不再走按钮路径</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="rate_direct_set">
+                    直设媒体倍速（当前实现）
+                  </label>
+                  <div class="hint">直接给 video/audio 的 playbackRate 赋值（含按钮不可用时的兜底与倍速保活）；关闭后仅在按钮路径设速</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="rate_keep_alive">
+                    倍速保活（当前实现）
+                  </label>
+                  <div class="hint">播放期间定时检测并恢复被页面重置的倍速</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="rate_unlock">
+                    解除倍速限制：拦截倍速回写（新增）
+                  </label>
+                  <div class="hint">包装媒体元素的 playbackRate，拦截雨课堂播放器把倍速回写为低值（含限速定时器的异步回写）；用户手动调速不受影响</div>
+                </div>
+                <div class="form-item">
+                  <label style="font-weight:bold;font-size:13px;">刷课流程</label>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="flow_auto_switch">
+                    自动切换下一个任务点/切换界面
+                  </label>
+                  <div class="hint">开启：当前任务点完成后自动点击下一个任务点或跳转其它页面继续刷课；关闭：完成后停留当前页面，手动切换后点击[开始刷课]继续（避免切换页面后抓取失败）</div>
+                </div>
+                <div class="form-item">
+                  <label class="checkbox-label">
+                    <input type="checkbox" id="flow_restore_on_stop">
+                    停止刷课后还原修改
+                  </label>
+                  <div class="hint">开启：点击[停止刷课]时还原倍速、静音、倍速/暂停拦截包装等页面修改；关闭：保留这些修改（例如继续保持倍速播放）</div>
                 </div>
                 <div class="settings-footer">
                   <button id="save_settings">保存并关闭</button>
@@ -554,8 +664,8 @@
                 </div>
               </div>
               <div class="footer">
-                <button id="btn-setting">AI配置</button>
-                <button id="btn-clear">清除缓存</button>
+                <button id="btn-setting">脚本设置</button>
+                <button id="btn-clear">清除课程进度缓存</button>
                 <button id="btn-start">开始刷课</button>
                 <button id="btn-stop">停止刷课</button>
                 <button id="btn-reload">重新加载</button>
@@ -584,7 +694,15 @@
       aiFormatSelect: doc.getElementById('ai_format'),
       authMethodSelect: doc.getElementById('auth_method'),
       featureAutoAI: doc.getElementById('feature_auto_ai'),
+      featureUseOCR: doc.getElementById('feature_use_ocr'),
       featureAutoComment: doc.getElementById('feature_auto_comment'),
+      rateTargetInput: doc.getElementById('rate_target'),
+      rateButtonSet: doc.getElementById('rate_button_set'),
+      rateDirectSet: doc.getElementById('rate_direct_set'),
+      rateKeepAlive: doc.getElementById('rate_keep_alive'),
+      rateUnlock: doc.getElementById('rate_unlock'),
+      flowAutoSwitch: doc.getElementById('flow_auto_switch'),
+      flowRestoreOnStop: doc.getElementById('flow_restore_on_stop'),
       minimality: doc.getElementById('minimality'),
       question: doc.getElementById('question'),
       miniBasic: doc.getElementById('mini-basic')
@@ -684,12 +802,30 @@
       const saved = Store.getFeatureConf();
       ui.featureAutoAI.checked = saved.autoAI;
       ui.featureAutoComment.checked = saved.autoComment;
+      ui.featureUseOCR.checked = saved.useOCR;
+    };
+    const loadRateConf = () => {
+      const saved = Store.getRateConf();
+      ui.rateTargetInput.value = saved.targetRate;
+      ui.rateButtonSet.checked = saved.buttonSetEnabled;
+      ui.rateDirectSet.checked = saved.directSetEnabled;
+      ui.rateKeepAlive.checked = saved.keepAliveEnabled;
+      ui.rateUnlock.checked = saved.ratechangeBlockEnabled;
+    };
+    const loadFlowConf = () => {
+      const saved = Store.getFlowConf();
+      ui.flowAutoSwitch.checked = saved.autoSwitch;
+      ui.flowRestoreOnStop.checked = saved.restoreOnStop;
     };
     loadAIConf();
     loadFeatureConf();
+    loadRateConf();
+    loadFlowConf();
     ui.btnSetting.onclick = () => {
       loadAIConf();
       loadFeatureConf();
+      loadRateConf();
+      loadFlowConf();
       ui.settings.style.display = 'block';
     };
     ui.closeSettings.onclick = () => {
@@ -706,11 +842,30 @@
       Store.setAIConf(conf);
       const featureConf = {
         autoAI: ui.featureAutoAI.checked,
-        autoComment: ui.featureAutoComment.checked
+        autoComment: ui.featureAutoComment.checked,
+        useOCR: ui.featureUseOCR.checked
       };
       Store.setFeatureConf(featureConf);
+      const rateConf = {
+        targetRate: Number(ui.rateTargetInput.value),
+        buttonSetEnabled: ui.rateButtonSet.checked,
+        directSetEnabled: ui.rateDirectSet.checked,
+        keepAliveEnabled: ui.rateKeepAlive.checked,
+        ratechangeBlockEnabled: ui.rateUnlock.checked
+      };
+      Store.setRateConf(rateConf);
+      const flowConf = {
+        autoSwitch: ui.flowAutoSwitch.checked,
+        restoreOnStop: ui.flowRestoreOnStop.checked
+      };
+      Store.setFlowConf(flowConf);
+      // 先还原旧的倍速拦截包装，下次接管媒体时按新开关重新安装
+      RateUnlock.uninstallAll();
       ui.settings.style.display = 'none';
-      log('✅ AI 配置已保存');
+      log('✅ 脚本配置已保存');
+      if (!featureConf.useOCR) {
+        log('已关闭 OCR：答题时截图将直接发送给多模态模型');
+      }
     };
 
     ui.btnClear.onclick = () => {
@@ -720,16 +875,23 @@
       log('已清除当前课程的刷课进度缓存');
     };
 
-    // 停止刷课：清除自动恢复标记后刷新页面，刷新后脚本回到空闲状态（进度缓存保留）
+    let stopHandler = null;
+    // 停止刷课：交给外部处理器结束会话并还原对页面/播放器的修改（进度缓存保留）
     ui.btnStop.onclick = () => {
+      if (stopHandler) {
+        stopHandler();
+        return;
+      }
+      Session.stop();
       Store.clearPendingAutoStart();
-      log('已停止刷课，页面即将刷新');
-      window.parent.location.reload();
+      log('已停止刷课');
     };
 
-    // 重新加载：重建自动恢复标记后刷新页面，刷新后自动恢复刷课（停止后点击同样生效）
+    // 重新加载：刷新页面；刷课进行中会自动续跑，已停止刷课时仅重新加载、不会自动恢复
     ui.btnReload.onclick = () => {
-      Store.setPendingAutoStart(Utils.getCurrentClassroomId());
+      if (!Session.isStopped()) {
+        Store.setPendingAutoStart(Utils.getCurrentClassroomId());
+      }
       log('正在重新加载脚本...');
       window.parent.location.reload();
     };
@@ -757,6 +919,9 @@
         startHandler = fn;
         ui.btnStart.onclick = invokeStart;
       },
+      setStopHandler(fn) {
+        stopHandler = fn;
+      },
       start() {
         invokeStart();
       },
@@ -767,6 +932,187 @@
     };
   }
 
+  // ---- 倍速解锁：拦截雨课堂 xt 播放器的倍速回写 ----
+  // xt 播放器的限速器（timeupdate + setInterval 每秒执行）会把倍速强制写回内部记录值（默认 1）。
+  // 这里不删除页面的监听（内部数据结构不可靠），而是包装媒体元素自身的 playbackRate setter：
+  // 拦截低于目标倍速的非手动回写（限速定时器/事件回调里的回写），用户手势内的手动调速放行。
+  const RateUnlock = {
+    // media -> { hadOwn, origDesc }：元素级 playbackRate 包装的还原记录
+    // 用 Map 而非 WeakMap：卸载时需要枚举全部已包装元素以还原（记录体积很小，可忽略持有开销）
+    installedMedia: new Map(),
+
+    // 幂等安装：同一元素重复调用不叠加包装；必须先于首次设速调用（设速后限速器就开始回写）
+    ensure(media) {
+      media = media || document.querySelector('video') || document.querySelector('audio');
+      if (!media || !Store.getRateConf().ratechangeBlockEnabled) return false;
+      if (this.installedMedia.has(media)) return true;
+      const ownDesc = Object.getOwnPropertyDescriptor(media, 'playbackRate');
+      const desc = ownDesc || Object.getOwnPropertyDescriptor(HTMLMediaElement.prototype, 'playbackRate');
+      if (!desc || typeof desc.get !== 'function' || typeof desc.set !== 'function') return false;
+      let interceptLogged = false;
+      try {
+        Object.defineProperty(media, 'playbackRate', {
+          configurable: true,
+          enumerable: desc.enumerable,
+          get() {
+            return desc.get.call(this);
+          },
+          set(value) {
+            const num = Number(value);
+            const conf = Store.getRateConf();
+            // 低于目标倍速的非手动回写（如限速定时器写回 1）一律拦截
+            if (conf.ratechangeBlockEnabled && conf.targetRate > 1
+              && Number.isFinite(num) && num < conf.targetRate
+              && !RateUnlock.isUserGesture()) {
+              if (!interceptLogged) {
+                interceptLogged = true;
+                console.log('[倍速] 已拦截页面的倍速回写（解除倍速限制生效）');
+              }
+              return;
+            }
+            desc.set.call(this, value);
+          }
+        });
+      } catch (e) {
+        console.warn('[倍速] 倍速回写拦截安装失败：', e);
+        return false;
+      }
+      this.installedMedia.set(media, { hadOwn: !!ownDesc, origDesc: ownDesc || null });
+      console.log(`[倍速] 倍速回写拦截已启用：低于 ${Store.getRateConf().targetRate}x 的非手动回写将被拦截`);
+      return true;
+    },
+
+    // 是否处于用户手势中；不支持 userActivation 的浏览器按非手势处理（优先保证拦截生效）
+    isUserGesture() {
+      try {
+        if (navigator.userActivation) return navigator.userActivation.isActive === true;
+      } catch (_) { /* 忽略环境差异 */ }
+      return false;
+    },
+
+    // 明确的清理/还原入口：恢复全部被包装的元素（面板保存后按新开关重新安装）
+    uninstallAll() {
+      for (const [media, record] of this.installedMedia) {
+        try {
+          if (record.hadOwn && record.origDesc) Object.defineProperty(media, 'playbackRate', record.origDesc);
+          else delete media.playbackRate;
+        } catch (_) { /* 单个还原失败不影响其余对象 */ }
+      }
+      this.installedMedia.clear();
+    }
+  };
+
+  // ---- 暂停拦截：把 pause 动作替换为空方法 ----
+  // 雨课堂 xt 播放器在切屏/失焦等场景会调用媒体的 pause() 做惩罚性暂停。
+  // 不采用“检测到暂停再自动播放”（会与页面的暂停逻辑互相打架），而是包装 pause 方法：
+  // 刷课进行中直接吞掉暂停动作；停止刷课/视频结束/临近结尾/任务完成时放行真实暂停。
+  const PauseGuard = {
+    // media -> { hadOwn, origPause, allowPause }：元素级 pause 包装的还原记录与放行判定
+    // 用 Map 而非 WeakMap：卸载时需要枚举全部已包装元素以还原（记录体积很小，可忽略持有开销）
+    installed: new Map(),
+
+    // 幂等安装：同一元素重复调用不叠加包装，仅更新放行判定（随任务轮换更新 shouldResume）
+    install(media, allowPause = () => true) {
+      if (!media) return false;
+      const record = this.installed.get(media);
+      if (record) {
+        record.allowPause = allowPause;
+        return true;
+      }
+      const hadOwn = Object.prototype.hasOwnProperty.call(media, 'pause');
+      const origPause = media.pause;
+      if (typeof origPause !== 'function') return false;
+      let interceptLogged = false;
+      try {
+        media.pause = function () {
+          const rec = PauseGuard.installed.get(media);
+          if (!rec || rec.allowPause()) return origPause.apply(this, arguments);
+          if (!interceptLogged) {
+            interceptLogged = true;
+            console.log('[暂停] 已拦截页面的暂停动作（暂停拦截生效）');
+          }
+          // 空方法：吞掉本次暂停动作
+        };
+      } catch (e) {
+        console.warn('[暂停] 暂停拦截安装失败：', e);
+        return false;
+      }
+      this.installed.set(media, { hadOwn, origPause, allowPause });
+      return true;
+    },
+
+    // 还原单个元素被包装的 pause
+    uninstall(media) {
+      const record = this.installed.get(media);
+      if (!record) return;
+      try {
+        if (record.hadOwn) media.pause = record.origPause;
+        else delete media.pause;
+      } catch (_) { /* 单个还原失败不影响其余对象 */ }
+      this.installed.delete(media);
+    },
+
+    // 明确的清理/还原入口：恢复全部被包装的元素（停止刷课时还原页面修改）
+    uninstallAll() {
+      for (const media of [...this.installed.keys()]) {
+        this.uninstall(media);
+      }
+    }
+  };
+
+  // ---- 页面/播放器修改的还原记录 ----
+  // 快照脚本首次改动前的原值（媒体倍速/音量/静音、速度按钮 DOM、防切屏包装），
+  // 停止刷课时一次性还原。用 Map 保证还原时可枚举全部对象（记录仅在页面生命周期内有效）。
+  const PageRestore = {
+    mediaStates: new Map(), // media -> { playbackRate, volume, muted, defaultMuted }
+    nodeStates: new Map(), // node -> { attrs: {name: 原值|null}, text }
+    screenCheckUndo: null,
+
+    snapshotMedia(media) {
+      if (!media || this.mediaStates.has(media)) return;
+      this.mediaStates.set(media, {
+        playbackRate: media.playbackRate,
+        volume: media.volume,
+        muted: media.muted,
+        defaultMuted: media.defaultMuted
+      });
+    },
+    snapshotNode(node, attrs = []) {
+      if (!node || this.nodeStates.has(node)) return;
+      const savedAttrs = {};
+      for (const name of attrs) savedAttrs[name] = node.getAttribute(name);
+      this.nodeStates.set(node, { attrs: savedAttrs, text: node.innerText });
+    },
+    restoreAll() {
+      // 先卸载倍速/暂停拦截包装，避免还原时被拦截
+      RateUnlock.uninstallAll();
+      PauseGuard.uninstallAll();
+      for (const [media, state] of this.mediaStates) {
+        try {
+          media.playbackRate = state.playbackRate;
+          media.volume = state.volume;
+          media.muted = state.muted;
+          media.defaultMuted = state.defaultMuted;
+        } catch (_) { /* 单个对象还原失败不影响其余对象 */ }
+      }
+      this.mediaStates.clear();
+      for (const [node, state] of this.nodeStates) {
+        try {
+          for (const [name, value] of Object.entries(state.attrs)) {
+            if (value === null) node.removeAttribute(name);
+            else node.setAttribute(name, value);
+          }
+          node.innerText = state.text;
+        } catch (_) { }
+      }
+      this.nodeStates.clear();
+      if (this.screenCheckUndo) {
+        this.screenCheckUndo();
+        this.screenCheckUndo = null;
+      }
+    }
+  };
+
   // ---- 播放器工具 ----
   const Player = {
     isNearEnd(media, threshold = 1) {
@@ -775,69 +1121,67 @@
       const currentTime = Number(media.currentTime || 0);
       return Number.isFinite(duration) && duration > 1 && currentTime > 0 && duration - currentTime <= threshold;
     },
-    applySpeed() {
-      const rate = Config.playbackRate;
+    // 接管媒体并设速：autoplay 为 true 时先启动播放并静音（音频/内嵌视频路径）
+    applySpeed(media, autoplay = false) {
+      if (Session.isStopped()) return;
+      const conf = Store.getRateConf();
+      const target = media || document.querySelector('video') || document.querySelector('audio');
+      if (!target) return;
+      // 倍速回写拦截必须先于首次设速安装：设速后限速器就会开始回写
+      RateUnlock.ensure(target);
+      // 记录原值，停止刷课时还原
+      PageRestore.snapshotMedia(target);
+      if (autoplay) {
+        target.play();
+        target.volume = 0;
+      }
+      const rate = conf.targetRate;
+      const rateText = Number(rate).toFixed(2);
       const speedBtn = document.querySelector('xt-speedlist xt-button') || document.getElementsByTagName('xt-speedlist')[0]?.firstElementChild?.firstElementChild;
       const speedWrap = document.getElementsByTagName('xt-speedbutton')[0];
-      if (speedBtn && speedWrap) {
+      if (conf.buttonSetEnabled && speedBtn && speedWrap && target.tagName.toLowerCase() === 'video') {
+        PageRestore.snapshotNode(speedBtn, ['data-speed', 'keyt']);
         speedBtn.setAttribute('data-speed', rate);
-        speedBtn.setAttribute('keyt', `${rate}.00`);
-        speedBtn.innerText = `${rate}.00X`;
+        speedBtn.setAttribute('keyt', rateText);
+        speedBtn.innerText = `${rateText}X`;
         const mousemove = document.createEvent('MouseEvent');
         mousemove.initMouseEvent('mousemove', true, true, unsafeWindow, 0, 10, 10, 10, 10, 0, 0, 0, 0, 0, null);
         speedWrap.dispatchEvent(mousemove);
         speedBtn.click();
-      } else if (document.querySelector('video')) {
-        document.querySelector('video').playbackRate = rate;
+      } else if (conf.directSetEnabled) {
+        target.playbackRate = rate;
       }
     },
     mute() {
+      if (Session.isStopped()) return;
       const muteBtn = document.querySelector('#video-box > div > xt-wrap > xt-controls > xt-inner > xt-volumebutton > xt-icon');
       if (muteBtn) muteBtn.click();
       const video = document.querySelector('video');
-      if (video) video.volume = 0;
+      if (video) {
+        PageRestore.snapshotMedia(video);
+        video.volume = 0;
+      }
     },
-    applyMediaDefault(media) {
-      if (!media) return;
-      media.play();
-      media.volume = 0;
-      media.playbackRate = Config.playbackRate;
-    },
-    observePause(video, shouldResume = () => true) {
-      if (!video) return () => { };
-      const canResume = () => shouldResume() && !video.ended && !this.isNearEnd(video);
-      // 自动播放
-      const playVideo = () => {
-        if (!canResume()) return;
-        video.play().catch(e => {
-          if (!canResume()) return;
+    // 暂停拦截：刷课期间把 pause 替换为空方法，而非“检测到暂停再自动播放”（后者会与页面暂停互相打架）
+    // 停止刷课/视频结束/临近结尾/任务完成时放行真实暂停
+    blockPause(media, shouldResume = () => true) {
+      if (!media) return () => { };
+      const allowPause = () => Session.isStopped() || media.ended || this.isNearEnd(media) || !shouldResume();
+      PauseGuard.install(media, allowPause);
+      // 启动播放（仅需一次；之后页面的暂停动作直接被拦截，无需反复检测恢复）
+      let retryTimer = 0;
+      const startPlay = () => {
+        if (allowPause()) return;
+        media.play().catch(e => {
+          if (allowPause()) return;
           console.warn('自动播放失败:', e);
-          setTimeout(playVideo, 3000);
+          retryTimer = setTimeout(startPlay, 3000);
         });
       };
-      playVideo();
-      // 直接监听 pause 事件，不依赖播放器 UI 元素
-      const onPause = () => { if (canResume()) playVideo(); };
-      video.addEventListener('pause', onPause);
-      // 定时兜底：防止 pause 事件被拦截
-      const timer = setInterval(() => { if (video.paused && canResume()) playVideo(); }, 5000);
-      // 播放器 UI 观察：按钮被点击暂停时 tip 变为「播放」
-      const target = document.getElementsByClassName('play-btn-tip')[0];
-      let observer = null;
-      if (target) {
-        observer = new MutationObserver(list => {
-          for (const mutation of list) {
-            if (mutation.type === 'childList' && target.innerText === '播放' && canResume()) {
-              video.play();
-            }
-          }
-        });
-        observer.observe(target, { childList: true });
-      }
+      startPlay();
       return () => {
-        video.removeEventListener('pause', onPause);
-        clearInterval(timer);
-        if (observer) observer.disconnect();
+        clearTimeout(retryTimer);
+        PauseGuard.uninstall(media);
       };
     },
     waitForEnd(media, timeout = 0) {
@@ -845,16 +1189,19 @@
         if (!media) return resolve();
         if (media.ended) return resolve();
         let timer;
-        const onEnded = () => {
+        let stopTimer;
+        const finish = () => {
           clearTimeout(timer);
+          clearInterval(stopTimer);
+          media.removeEventListener('ended', onEnded);
           resolve();
         };
+        const onEnded = () => finish();
         media.addEventListener('ended', onEnded, { once: true });
+        // 停止刷课时提前结束等待，让调用流程尽快收尾
+        stopTimer = setInterval(() => { if (Session.isStopped()) finish(); }, 500);
         if (timeout > 0) {
-          timer = setTimeout(() => {
-            media.removeEventListener('ended', onEnded);
-            resolve();
-          }, timeout);
+          timer = setTimeout(finish, timeout);
         }
       });
     }
@@ -887,16 +1234,13 @@
         nodeId: query.get('node_id') || ''
       };
     },
-    getMediaCandidates() {
-      return [...document.querySelectorAll('video, audio')].filter(media => {
+    getMedia() {
+      // 选取可见的 video 或任意 audio 作为接管目标
+      const candidates = [...document.querySelectorAll('video, audio')].filter(media => {
         if (!(media instanceof HTMLMediaElement)) return false;
         const rect = media.getBoundingClientRect();
-        const isVisible = rect.width > 0 && rect.height > 0;
-        return isVisible || media.tagName.toLowerCase() === 'audio';
+        return (rect.width > 0 && rect.height > 0) || media.tagName.toLowerCase() === 'audio';
       });
-    },
-    getMedia() {
-      const candidates = this.getMediaCandidates();
       if (!candidates.length) return document.querySelector('video') || document.querySelector('audio');
       const score = media => {
         const rect = media.getBoundingClientRect();
@@ -922,19 +1266,25 @@
     keepAlive(shouldResume = () => true) {
       let lastMedia = null;
       const tick = () => {
-        if (!shouldResume()) return;
+        if (!shouldResume() || Session.isStopped()) return;
         const media = this.getMedia();
         if (!media) return;
         if (lastMedia !== media) {
           lastMedia = media;
-          media.addEventListener('pause', tick);
+          // 暂停拦截随媒体更换迁移：pause 被替换为空方法，无需“检测到暂停再自动播放”
+          PauseGuard.install(media, () => Session.isStopped() || media.ended || Player.isNearEnd(media) || !shouldResume());
         }
+        // 记录原值，停止刷课时还原
+        PageRestore.snapshotMedia(media);
         media.muted = true;
         media.defaultMuted = true;
         media.volume = 0;
-        media.playbackRate = Config.playbackRate;
-        if (media.paused && !media.ended && !Player.isNearEnd(media)) {
-          media.play().catch(() => { });
+        // 解锁包装随媒体更换迁移（幂等，重复调用无副作用）
+        RateUnlock.ensure(media);
+        // 倍速保活：定时恢复被页面重置的倍速，受“倍速保活”与“直设媒体倍速”双开关控制
+        const rateConf = Store.getRateConf();
+        if (rateConf.keepAliveEnabled && rateConf.directSetEnabled) {
+          media.playbackRate = rateConf.targetRate;
         }
       };
       const timer = setInterval(tick, 500);
@@ -943,7 +1293,7 @@
       tick();
       return () => {
         clearInterval(timer);
-        if (lastMedia) lastMedia.removeEventListener('pause', tick);
+        if (lastMedia) PauseGuard.uninstall(lastMedia);
         document.removeEventListener('visibilitychange', tick);
         window.removeEventListener('focus', tick);
       };
@@ -951,14 +1301,15 @@
     getActiveLeafTitle() {
       return document.querySelector('.leaf-item.is-active')?.innerText?.replace(/\s+/g, ' ').trim() || '';
     },
-    getExerciseDocument() {
-      const localHasExercise = document.querySelector('#app .container-body .container-problem')
-        || document.querySelector('#app .container-problem')
-        || document.querySelector('.container-problem');
-      if (localHasExercise) return document;
-
-      const frames = [...document.querySelectorAll('iframe')];
-      for (const frame of frames) {
+    // 定位作业容器：先查本页，找不到再查同源 iframe
+    getExerciseContainer() {
+      const findIn = doc => doc.querySelector('#app .container-body .container-problem')
+        || doc.querySelector('#app .container-problem')
+        || doc.querySelector('.container-problem')
+        || null;
+      const local = findIn(document);
+      if (local) return local;
+      for (const frame of document.querySelectorAll('iframe')) {
         try {
           const doc = frame.contentDocument;
           if (!doc?.body) continue;
@@ -967,20 +1318,13 @@
             || doc.querySelector('.subject-item')
             || doc.querySelector('.item-body')
           ) {
-            return doc;
+            return findIn(doc);
           }
         } catch (_) {
-          // ignore cross-document access failures
+          // 跨域 iframe 无法访问，跳过
         }
       }
       return null;
-    },
-    getExerciseContainer() {
-      const exerciseDoc = this.getExerciseDocument();
-      return exerciseDoc?.querySelector('#app .container-body .container-problem')
-        || exerciseDoc?.querySelector('#app .container-problem')
-        || exerciseDoc?.querySelector('.container-problem')
-        || null;
     },
     getExerciseQuestionTabs(root = this.getExerciseContainer()) {
       if (!root) return [];
@@ -1050,47 +1394,71 @@
         ...document.querySelectorAll(selectors)
       ];
       return nodes.find(el => this.isVisibleElement(el) && pattern.test(this.normalizeText(el.innerText)));
-    },
-    getAllScourse() { // 获得ai-workspace的课程列表
-      const list = document?.querySelectorAll(".nav-item-leaf-box")
-      if (!list) panel.warn("没有发现课程资源")
-      return list
     }
   };
 
   // ---- 防切屏 ----
   function preventScreenCheck() {
     const win = unsafeWindow;
+    // 幂等安装：重复调用不再叠加包装，并登记还原入口（停止刷课时恢复页面原行为）
+    if (PageRestore.screenCheckUndo) return;
     const blackList = new Set(['visibilitychange', 'blur', 'pagehide']);
-    win._addEventListener = win.addEventListener;
+    const origWinAdd = win.addEventListener;
+    const origDocAdd = document.addEventListener;
+    win._addEventListener = origWinAdd;
     win.addEventListener = (...args) => blackList.has(args[0]) ? undefined : win._addEventListener(...args);
-    document._addEventListener = document.addEventListener;
+    document._addEventListener = origDocAdd;
     document.addEventListener = (...args) => blackList.has(args[0]) ? undefined : document._addEventListener(...args);
+    // 属性遮蔽声明为可配置，便于停止刷课时删除还原
     Object.defineProperties(document, {
-      hidden: { value: false },
-      visibilityState: { value: 'visible' },
-      hasFocus: { value: () => true },
-      onvisibilitychange: { get: () => undefined, set: () => { } },
-      onblur: { get: () => undefined, set: () => { } }
+      hidden: { value: false, configurable: true },
+      visibilityState: { value: 'visible', configurable: true },
+      hasFocus: { value: () => true, configurable: true },
+      onvisibilitychange: { get: () => undefined, set: () => { }, configurable: true },
+      onblur: { get: () => undefined, set: () => { }, configurable: true }
     });
     Object.defineProperties(win, {
-      onblur: { get: () => undefined, set: () => { } },
-      onpagehide: { get: () => undefined, set: () => { } }
+      onblur: { get: () => undefined, set: () => { }, configurable: true },
+      onpagehide: { get: () => undefined, set: () => { }, configurable: true }
     });
+    PageRestore.screenCheckUndo = () => {
+      try {
+        win.addEventListener = origWinAdd;
+        delete win._addEventListener;
+      } catch (_) { /* 尽力还原 */ }
+      try {
+        document.addEventListener = origDocAdd;
+        delete document._addEventListener;
+      } catch (_) { }
+      for (const key of ['hidden', 'visibilityState', 'hasFocus', 'onvisibilitychange', 'onblur']) {
+        try { delete document[key]; } catch (_) { }
+      }
+      for (const key of ['onblur', 'onpagehide']) {
+        try { delete win[key]; } catch (_) { }
+      }
+    };
   }
 
   // ---- OCR & AI ----
   const Solver = {
+    // 解析答题模式：OCR 开启走 OCR 识别（原行为），关闭即认为模型支持图片输入，截图直传
+    resolveAnswerMode() {
+      return Store.getFeatureConf().useOCR ? 'ocr' : 'vision';
+    },
+    // 两条路径共用的截图逻辑
+    async capture(element) {
+      panel.log('正在截图...');
+      return html2canvas(element, {
+        useCORS: true,
+        logging: false,
+        scale: 2,
+        backgroundColor: '#ffffff'
+      });
+    },
     async recognize(element) {
       if (!element) return '无元素';
       try {
-        panel.log('正在截图...');
-        const canvas = await html2canvas(element, {
-          useCORS: true,
-          logging: false,
-          scale: 2,
-          backgroundColor: '#ffffff'
-        });
+        const canvas = await this.capture(element);
         panel.log('正在 OCR 识别 (首轮较慢)...');
         const { data: { text } } = await Tesseract.recognize(canvas, 'chi_sim', {
           logger: m => {
@@ -1106,23 +1474,43 @@
         return 'OCR识别出错';
       }
     },
-    async askAI(ocrText, optionCount = 0) {
-      const saved = Store.getAIConf();
-      const API_URL = saved.url;
-      const API_KEY = saved.key;
-      const MODEL_NAME = saved.model;
-      const API_FORMAT = saved.apiFormat || 'openai';
-      const AUTH_METHOD = saved.authMethod || 'bearer';
-      return new Promise((resolve, reject) => {
-        if (!API_KEY || API_KEY.includes('sk-xxxx')) {
-          const msg = '⚠️ 请在 [AI配置] 中填写有效的 API Key';
-          panel.log(msg);
-          reject(msg);
-          return;
+    // 截图直传路径：把截图压缩成模型可接受的 JPEG 图片负载
+    toImagePayload(canvas) {
+      const MAX_SIDE = 1568; // 限制最长边，避免 base64 请求体过大
+      let target = canvas;
+      const maxSide = Math.max(canvas.width, canvas.height);
+      if (maxSide > MAX_SIDE) {
+        const ratio = MAX_SIDE / maxSide;
+        const scaled = document.createElement('canvas');
+        scaled.width = Math.round(canvas.width * ratio);
+        scaled.height = Math.round(canvas.height * ratio);
+        scaled.getContext('2d').drawImage(canvas, 0, 0, scaled.width, scaled.height);
+        target = scaled;
+      }
+      const dataUrl = target.toDataURL('image/jpeg', 0.85);
+      return { base64: dataUrl.split(',')[1], mediaType: 'image/jpeg', dataUrl };
+    },
+    // 按模式准备题目输入：vision 返回图片负载，ocr 返回 OCR 文本；失败或过短返回 null
+    async prepareQuestion(element, mode = 'ocr') {
+      if (!element) return null;
+      if (mode === 'vision') {
+        try {
+          const canvas = await this.capture(element);
+          return this.toImagePayload(canvas);
+        } catch (err) {
+          console.error('Screenshot error:', err);
+          panel.log(`截图失败: ${err.message || '网络错误'}`);
+          return null;
         }
-        const maxChar = String.fromCharCode(65 + optionCount - 1);
-        const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
-        const prompt = `
+      }
+      const text = await this.recognize(element);
+      return (text && text.length > 5) ? text : null;
+    },
+    // OCR 文本路径提示词
+    buildTextPrompt(ocrText, optionCount) {
+      const maxChar = String.fromCharCode(65 + optionCount - 1);
+      const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
+      return `
 你是专业做题助手，请分析 OCR 文本，判断题型后给出答案。
 强约束：
 1) 本题只有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}
@@ -1131,7 +1519,48 @@
 题目内容：
 ${ocrText}
 `;
-        const systemPrompt = "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。";
+    },
+    // 截图直传路径提示词
+    buildVisionPrompt(optionCount) {
+      const maxChar = String.fromCharCode(65 + optionCount - 1);
+      const rangeStr = optionCount ? `A-${maxChar}` : 'A-D';
+      return `
+你是专业做题助手，请直接分析题目截图，判断题型后给出答案。
+强约束：
+1) 本题只有 ${optionCount || '若干'} 个选项，范围 ${rangeStr}
+2) 以截图中选项出现顺序为准，映射 A/B/C/D...
+3) 输出格式必须包含“正确答案：”前缀，例如 正确答案：A 或 正确答案：ABD 或 正确答案：对/错
+`;
+    },
+    async askAI(question, optionCount = 0) {
+      const saved = Store.getAIConf();
+      const API_URL = saved.url;
+      const API_KEY = saved.key;
+      const MODEL_NAME = saved.model;
+      const API_FORMAT = saved.apiFormat || 'openai';
+      const AUTH_METHOD = saved.authMethod || 'bearer';
+      // question 为对象时走截图直传（多模态），为字符串时走 OCR 文本，两条路径并列
+      const isImage = !!question && typeof question === 'object';
+      return new Promise((resolve, reject) => {
+        if (!API_KEY || API_KEY.includes('sk-xxxx')) {
+          const msg = '⚠️ 请在 [AI配置] 中填写有效的 API Key';
+          panel.log(msg);
+          reject(msg);
+          return;
+        }
+        const prompt = isImage ? this.buildVisionPrompt(optionCount) : this.buildTextPrompt(question, optionCount);
+        const systemPrompt = isImage
+          ? "你是一个只输出答案的助手。请根据题目截图作答，判断题输出'对'或'错'，选择题输出字母。"
+          : "你是一个只输出答案的助手。判断题输出'对'或'错'，选择题输出字母。";
+        // 图片路径用多模态 content 数组承载截图，文本路径保持纯文本
+        const userContent = isImage
+          ? [
+            { type: 'text', text: prompt },
+            API_FORMAT === 'anthropic'
+              ? { type: 'image', source: { type: 'base64', media_type: question.mediaType, data: question.base64 } }
+              : { type: 'image_url', image_url: { url: question.dataUrl } }
+          ]
+          : prompt;
 
         // 构建认证 header
         const authHeader = AUTH_METHOD === 'x-api-key'
@@ -1153,7 +1582,7 @@ ${ocrText}
             max_tokens: 1024,
             system: systemPrompt,
             messages: [
-              { role: 'user', content: prompt }
+              { role: 'user', content: userContent }
             ]
           };
           // 调试日志
@@ -1166,14 +1595,6 @@ ${ocrText}
             url: API_URL,
             headers,
             data: JSON.stringify(requestBody),
-            data: JSON.stringify({
-              model: MODEL_NAME,
-              max_tokens: 1024,
-              system: systemPrompt,
-              messages: [
-                { role: 'user', content: prompt }
-              ]
-            }),
             timeout: 120000, // 120秒，思考模型需要更长响应时间
             onload: res => {
               console.log('[AI响应] Status:', res.status);
@@ -1209,7 +1630,7 @@ ${ocrText}
               model: MODEL_NAME,
               messages: [
                 { role: 'system', content: systemPrompt },
-                { role: 'user', content: prompt }
+                { role: 'user', content: userContent }
               ],
               temperature: 0.1
             }),
@@ -1307,10 +1728,20 @@ ${ocrText}
     }
   };
 
+  // ---- 流程开关：自动切换下一个任务点/切换界面 ----
+  // 关闭后当前任务点完成（或失败）时不再点击下一个任务点、不再跳转其它页面，
+  // 提示后停在原地并清除跨页自动续跑标记，避免切换页面后抓取失败的连环报错
+  function haltIfNoAutoSwitch(context) {
+    if (Store.getFlowConf().autoSwitch) return false;
+    panel.log(`${context}：已关闭“自动切换任务点/界面”，停留当前页面；请手动切换后点击[开始刷课]继续`);
+    Store.clearPendingAutoStart();
+    panel.resetStartButton('开始刷课');
+    return true;
+  }
+
   // ---- v2 逻辑 ----
   class V2Runner {
-    constructor(panel) {
-      this.panel = panel;
+    constructor() {
       this.baseUrl = location.href;
       const { current } = Store.getProgress(this.baseUrl);
       this.outside = current.outside;
@@ -1328,7 +1759,7 @@ ${ocrText}
       await Utils.sleep(timeout);
       if (document.visibilityState === 'hidden' || !document.hasFocus()) {
         this.shouldStop = true;
-        this.panel.log('已交给新页面继续，返回目录页后会自动续跑');
+        panel.log('已交给新页面继续，返回目录页后会自动续跑');
         return true;
       }
       return false;
@@ -1361,19 +1792,20 @@ ${ocrText}
     }
 
     async run() {
-      this.panel.log(`检测到已播放到第 ${this.outside} 集，继续刷课...`);
+      panel.log(`检测到已播放到第 ${this.outside} 集，继续刷课...`);
       // 在课件页恢复时直接续播当前内容，不重新走列表流程
       if (location.pathname.includes('/studentCards/')) {
         const videoBox = document.querySelector('.video-box');
         const boxText = videoBox?.innerText || '';
         if ((videoBox || document.querySelector('video')) && !boxText.includes('已完成')) {
-          this.panel.log('检测到当前课件页，直接续播当前内容');
+          panel.log('检测到当前课件页，直接续播当前内容');
           await this.waitCoursewareVideo();
+          if (haltIfNoAutoSwitch('当前课件内容播放完成')) return;
           history.back();
           await Utils.sleep(1000);
         }
       }
-      while (true) {
+      while (!Session.isStopped()) {
         await this.autoSlide();
         const list = document.querySelector('.logs-list')?.childNodes;
         if (!list || !list.length) {
@@ -1382,25 +1814,26 @@ ${ocrText}
           const returnUrl = pending?.returnUrl
             || (pending?.classroomId ? `/v2/web/studentLog/${pending.classroomId}` : '');
           if (returnUrl && !location.pathname.includes('/studentLog/')) {
-            this.panel.log('当前页面无课程列表，返回目录页继续');
+            if (haltIfNoAutoSwitch('当前页面无课程列表')) return;
+            panel.log('当前页面无课程列表，返回目录页继续');
             location.href = returnUrl;
             return;
           }
-          this.panel.log('未找到课程列表，稍后重试');
+          panel.log('未找到课程列表，稍后重试');
           await Utils.sleep(2000);
           continue;
         }
         console.log(`当前集数:${this.outside}/全部集数${list.length}`);
         if (this.outside >= list.length) {
-          this.panel.log('课程刷完啦 🎉');
-          this.panel.resetStartButton('刷完啦~');
+          panel.log('课程刷完啦 🎉');
+          panel.resetStartButton('刷完啦~');
           Store.removeProgress(this.baseUrl);
           Store.clearPendingAutoStart();
           break;
         }
         const course = list[this.outside]?.querySelector('.content-box')?.querySelector('section');
         if (!course) {
-          this.panel.log('未找到当前课程节点，跳过');
+          panel.log('未找到当前课程节点，跳过');
           this.updateProgress(this.outside + 1, 0);
           continue;
         }
@@ -1415,12 +1848,12 @@ ${ocrText}
         let isCompleted = this.checkCompletionStatus(statusBox, statusText);
 
         if (isCompleted) {
-          this.panel.log(`✅ ${title} 已完成，跳过`);
+          panel.log(`✅ ${title} 已完成，跳过`);
           this.updateProgress(this.outside + 1, 0);
           continue;
         }
 
-        this.panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}，标题：${title}`);
+        panel.log(`刷课状态：第 ${this.outside + 1}/${list.length} 个，类型 ${type}，标题：${title}`);
         if (type.includes('shipin')) {
           await this.handleVideo(course);
         } else if (type.includes('piliang')) {
@@ -1430,20 +1863,22 @@ ${ocrText}
         } else if (type.includes('kejian')) {
           await this.handleCourseware(course);
         } else if (type.includes('kaoshi')) {
-          this.panel.log('考试区域脚本会被屏蔽，已跳过');
+          panel.log('考试区域脚本会被屏蔽，已跳过');
           this.updateProgress(this.outside + 1, 0);
         } else {
-          this.panel.log('非视频/批量/课件/考试，已跳过');
+          panel.log('非视频/批量/课件/考试，已跳过');
           this.updateProgress(this.outside + 1, 0);
         }
-        if (this.shouldStop) return;
+        if (this.shouldStop || Session.isStopped()) return;
       }
     }
 
     async autoSlide() {
       const frequency = Math.floor((this.outside + 1) / 20) + 1;
       for (let i = 0; i < frequency; i++) {
-        Utils.scrollToBottom('.viewContainer');
+        // 下滑到最底部，触发课程加载
+        const container = document.querySelector('.viewContainer');
+        if (container) container.scrollTop = container.scrollHeight;
         await Utils.sleep(800);
       }
     }
@@ -1455,16 +1890,21 @@ ${ocrText}
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       const title = document.querySelector('.title')?.innerText || '视频';
       const isDeadline = document.querySelector('.box')?.innerText.includes('已过考核截止时间');
-      if (isDeadline) this.panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
+      if (isDeadline) panel.log(`${title} 已过截止，进度不再增加，将直接跳过`);
       Player.applySpeed();
       Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
+      const stopObserve = Player.blockPause(document.querySelector('video'));
       await Utils.poll(() => {
         Utils.dismissPopups();
         return isDeadline || Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 5000, timeout: await Utils.getDDL() });
       stopObserve();
+      if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
+      if (haltIfNoAutoSwitch('当前视频播放完成')) {
+        this.shouldStop = true;
+        return;
+      }
       history.back();
       await Utils.sleep(1200);
     }
@@ -1472,7 +1912,7 @@ ${ocrText}
     async handleBatch(course, list) {
       const expandBtn = course.querySelector('.sub-info')?.querySelector('.gray')?.querySelector('span');
       if (!expandBtn) {
-        this.panel.log('未找到批量展开按钮，跳过');
+        panel.log('未找到批量展开按钮，跳过');
         this.updateProgress(this.outside + 1, 0);
         return;
       }
@@ -1480,7 +1920,7 @@ ${ocrText}
       await Utils.sleep(1200);
       const activities = list[this.outside]?.querySelector('.leaf_list__wrap')?.querySelectorAll('.activity__wrap') || [];
       let idx = this.inside;
-      this.panel.log(`进入批量区，内部进度 ${idx}/${activities.length}`);
+      panel.log(`进入批量区，内部进度 ${idx}/${activities.length}`);
       while (idx < activities.length) {
         const item = activities[idx];
         if (!item) break;
@@ -1495,83 +1935,79 @@ ${ocrText}
         const isCompleted = this.checkCompletionStatus(statusBox, statusText);
 
         if (isCompleted) {
-          this.panel.log(`✅ ${title} 已完成，跳过`);
+          panel.log(`✅ ${title} 已完成，跳过`);
           idx++;
           this.updateProgress(this.outside, idx);
           continue;
         }
 
         if (tagText === '音频') {
-          idx = await this.playAudioItem(item, title, idx);
+          idx = await this.playMediaItem(item, title, idx, true);
         } else if (tagHref.includes('shipin')) {
-          idx = await this.playVideoItem(item, title, idx);
+          idx = await this.playMediaItem(item, title, idx);
         } else if (tagHref.includes('tuwen') || tagHref.includes('taolun')) {
           idx = await this.autoCommentItem(item, tagHref.includes('tuwen') ? '图文' : '讨论', idx);
         } else if (tagHref.includes('zuoye')) {
           idx = await this.handleHomework(item, idx);
         } else {
-          this.panel.log(`类型未知，已跳过：${title}`);
+          panel.log(`类型未知，已跳过：${title}`);
           idx++;
           this.updateProgress(this.outside, idx);
         }
-        if (this.shouldStop) return;
+        if (this.shouldStop || Session.isStopped()) return;
       }
       this.updateProgress(this.outside + 1, 0);
       await Utils.sleep(1000);
     }
 
-    async playAudioItem(item, title, idx) {
-      this.panel.log(`开始播放音频：${title}`);
+    // 批量区媒体条目：打开并等待播放进度完成，audio 区分音频/视频的接管方式
+    async playMediaItem(item, title, idx, audio = false) {
+      panel.log(`开始播放${audio ? '音频' : '视频'}：${title}`);
       item.click();
       if (await this.waitForExternalHandoff()) return idx;
       await Utils.sleep(2500);
-      Player.applyMediaDefault(document.querySelector('audio'));
+      let stopPause = () => { };
+      if (audio) {
+        Player.applySpeed(document.querySelector('audio'), true);
+      } else {
+        Player.applySpeed();
+        Player.mute();
+        stopPause = Player.blockPause(document.querySelector('video'));
+      }
       const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
       await Utils.poll(() => {
         Utils.dismissPopups();
         return Utils.isProgressDone(progressNode?.innerHTML);
       }, { interval: 3000, timeout: await Utils.getDDL() });
-      this.panel.log(`${title} 播放完成`);
+      stopPause();
+      if (Session.isStopped()) return idx;
+      panel.log(`${title} 播放完成`);
       idx++;
       this.updateProgress(this.outside, idx);
-      history.back();
-      await Utils.sleep(1500);
-      return idx;
-    }
-
-    async playVideoItem(item, title, idx) {
-      this.panel.log(`开始播放视频：${title}`);
-      item.click();
-      if (await this.waitForExternalHandoff()) return idx;
-      await Utils.sleep(2500);
-      Player.applySpeed();
-      Player.mute();
-      const stopObserve = Player.observePause(document.querySelector('video'));
-      const progressNode = document.querySelector('.progress-wrap')?.querySelector('.text');
-      await Utils.poll(() => {
-        Utils.dismissPopups();
-        return Utils.isProgressDone(progressNode?.innerHTML);
-      }, { interval: 3000, timeout: await Utils.getDDL() });
-      stopObserve();
-      this.panel.log(`${title} 播放完成`);
-      idx++;
-      this.updateProgress(this.outside, idx);
+      if (haltIfNoAutoSwitch(`${title} 播放完成`)) {
+        this.shouldStop = true;
+        return idx;
+      }
       history.back();
       await Utils.sleep(1500);
       return idx;
     }
 
     async autoCommentItem(item, typeText, idx) {
-      this.panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
+      panel.log(`开始处理${typeText}：${item.querySelector('h2')?.innerText || ''}`);
       item.click();
       await Utils.sleep(1200);
 
       // 检查是否开启自动评论功能
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoComment) {
-        this.panel.log(`${typeText}已查看，但未开启自动回复功能`);
+        panel.log(`${typeText}已查看，但未开启自动回复功能`);
         idx++;
         this.updateProgress(this.outside, idx);
+        if (haltIfNoAutoSwitch(`${typeText}已查看`)) {
+          this.shouldStop = true;
+          return idx;
+        }
         history.back();
         await Utils.sleep(1000);
         return idx;
@@ -1597,7 +2033,7 @@ ${ocrText}
         if (!firstComment) await Utils.sleep(500);
       }
       if (!firstComment) {
-        this.panel.log('未找到评论内容，跳过该项');
+        panel.log('未找到评论内容，跳过该项');
       } else {
         const input = document.querySelector('.el-textarea__inner');
         if (input) {
@@ -1610,16 +2046,20 @@ ${ocrText}
             document.querySelector('.el-button--primary');
           if (sendBtn && !sendBtn.disabled && !sendBtn.classList.contains('is-disabled')) {
             sendBtn.click();
-            this.panel.log(`已在${typeText}区发表评论`);
+            panel.log(`已在${typeText}区发表评论`);
           } else {
-            this.panel.log('发送按钮不可用或不存在');
+            panel.log('发送按钮不可用或不存在');
           }
         } else {
-          this.panel.log('未找到评论输入框，跳过');
+          panel.log('未找到评论输入框，跳过');
         }
       }
       idx++;
       this.updateProgress(this.outside, idx);
+      if (haltIfNoAutoSwitch(`${typeText}已处理`)) {
+        this.shouldStop = true;
+        return idx;
+      }
       history.back();
       await Utils.sleep(1000);
       return idx;
@@ -1628,12 +2068,13 @@ ${ocrText}
     async handleHomework(item, idx) {
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoAI) {
-        this.panel.log('已关闭AI自动答题，跳过该项');
+        panel.log('已关闭AI自动答题，跳过该项');
         idx++;
         this.updateProgress(this.outside, idx);
         return idx;
       }
-      this.panel.log('进入作业，启动 OCR + AI');
+      const mode = Solver.resolveAnswerMode();
+      panel.log(mode === 'vision' ? '进入作业，启动 截图直传 + AI' : '进入作业，启动 OCR + AI');
       item.click();
       await Utils.sleep(1500);
       let i = 0;
@@ -1641,7 +2082,7 @@ ${ocrText}
       while (true) {
         const items = document.querySelectorAll('.subject-item.J_order');
         if (i >= items.length) {
-          this.panel.log(`所有题目处理完毕，共 ${items.length} 题，准备交卷`);
+          panel.log(`所有题目处理完毕，共 ${items.length} 题，准备交卷`);
           break;
         }
         const listItem = items[i];
@@ -1650,7 +2091,7 @@ ${ocrText}
         await Utils.sleep(1800);
         const disabled = document.querySelectorAll('.el-button.el-button--info.is-disabled.is-plain');
         if (disabled.length > 0) {
-          this.panel.log(`第 ${i + 1} 题已完成，跳过...`);
+          panel.log(`第 ${i + 1} 题已完成，跳过...`);
           i++;
           continue;
         }
@@ -1660,27 +2101,27 @@ ${ocrText}
           targetEl?.querySelector('.list-unstyled.list-unstyled-radio') ||
           targetEl?.querySelector('ul.list');
         if (listContainer) optionCount = listContainer.querySelectorAll('li').length;
-        const ocrResult = await Solver.recognize(targetEl);
-        if (ocrResult && ocrResult.length > 5) {
+        const questionInput = await Solver.prepareQuestion(targetEl, mode);
+        if (questionInput) {
           let retryCount = 0;
           let success = false;
           while (retryCount < maxRetry && !success) {
             try {
               if (retryCount > 0) {
-                this.panel.log(`🔄 第 ${i + 1} 题重试 ${retryCount}/${maxRetry}...`);
+                panel.log(`🔄 第 ${i + 1} 题重试 ${retryCount}/${maxRetry}...`);
               }
               panel.log('🤖 请求 AI 获取答案...');
-              const aiText = await Solver.askAI(ocrResult, optionCount);
+              const aiText = await Solver.askAI(questionInput, optionCount);
               await Solver.autoSelectAndSubmit(aiText, targetEl);
               success = true;
             } catch (err) {
               retryCount++;
-              this.panel.log(`AI 答题失败：${err}`);
+              panel.log(`AI 答题失败：${err}`);
               if (retryCount < maxRetry) {
-                this.panel.log(`等待 5 秒后重试...`);
+                panel.log(`等待 5 秒后重试...`);
                 await Utils.sleep(5000);
               } else {
-                this.panel.log(`⚠️ 第 ${i + 1} 题重试 ${maxRetry} 次后仍失败，跳过`);
+                panel.log(`⚠️ 第 ${i + 1} 题重试 ${maxRetry} 次后仍失败，跳过`);
               }
             }
           }
@@ -1690,32 +2131,41 @@ ${ocrText}
       }
       idx++;
       this.updateProgress(this.outside, idx);
+      if (haltIfNoAutoSwitch('当前作业处理完成')) {
+        this.shouldStop = true;
+        return idx;
+      }
       history.back();
       await Utils.sleep(1200);
       return idx;
     }
 
     async handleClassroom(course) {
-      this.panel.log('进入课堂模式...');
+      panel.log('进入课堂模式...');
       course.click();
       await Utils.sleep(5000);
       const iframe = document.querySelector('iframe.lesson-report-mobile');
       if (!iframe || !iframe.contentDocument) {
-        this.panel.log('未找到课堂 iframe，跳过');
+        panel.log('未找到课堂 iframe，跳过');
         this.updateProgress(this.outside + 1, 0);
         return;
       }
       const video = iframe.contentDocument.querySelector('video');
       const audio = iframe.contentDocument.querySelector('audio');
       if (video) {
-        Player.applyMediaDefault(video);
+        Player.applySpeed(video, true);
         await Player.waitForEnd(video);
       }
-      if (audio) {
-        Player.applyMediaDefault(audio);
+      if (!Session.isStopped() && audio) {
+        Player.applySpeed(audio, true);
         await Player.waitForEnd(audio);
       }
+      if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
+      if (haltIfNoAutoSwitch('当前课堂内容播放完成')) {
+        this.shouldStop = true;
+        return;
+      }
       history.go(-1);
       await Utils.sleep(1200);
     }
@@ -1728,7 +2178,7 @@ ${ocrText}
       let stopObserve = () => { };
       let reopenAttempts = 0;
       try {
-        while (Date.now() - start < deadline) {
+        while (Date.now() - start < deadline && !Session.isStopped()) {
           Utils.dismissPopups();
           const video = document.querySelector('video');
           const display = document.querySelector('.xt_video_player_current_time_display');
@@ -1736,13 +2186,13 @@ ${ocrText}
             // 播放器被关闭或视频元素被销毁，重新打开视频框
             const videoBox = document.querySelector('.video-box');
             if (videoBox && !videoBox.innerText.includes('已完成')) {
-              this.panel.log('播放器被关闭，正在重新打开');
+              panel.log('播放器被关闭，正在重新打开');
               videoBox.click();
               boundVideo = null;
             }
             reopenAttempts++;
             if (reopenAttempts >= 4) {
-              this.panel.log('播放器恢复失败，刷新页面重试');
+              panel.log('播放器恢复失败，刷新页面重试');
               location.reload();
               return false;
             }
@@ -1760,7 +2210,7 @@ ${ocrText}
             Player.applySpeed();
             Player.mute();
             boundVideo = video;
-            stopObserve = Player.observePause(video);
+            stopObserve = Player.blockPause(video);
           }
           const times = display.innerText || '';
           const [nowTime, totalTime] = times.split(' / ');
@@ -1777,7 +2227,7 @@ ${ocrText}
       const tableData = course.parentNode?.parentNode?.parentNode?.__vue__?.tableData;
       const deadlinePassed = (tableData?.deadline || tableData?.end) ? (tableData.deadline < Date.now() || tableData.end < Date.now()) : false;
       if (deadlinePassed) {
-        this.panel.log(`${course.querySelector('h2')?.innerText || '课件'} 已结课，跳过`);
+        panel.log(`${course.querySelector('h2')?.innerText || '课件'} 已结课，跳过`);
         this.updateProgress(this.outside + 1, 0);
         return;
       }
@@ -1787,7 +2237,7 @@ ${ocrText}
       // 检测"查看课件"按钮（课件概况页专用）
       const checkBtn = document.querySelector('.ppt_img_box .check') || document.querySelector('p.check');
       if (checkBtn && checkBtn.innerText?.trim() === '查看课件') {
-        this.panel.log('检测到"查看课件"按钮，正在点击...');
+        panel.log('检测到"查看课件"按钮，正在点击...');
         checkBtn.click();
         await Utils.sleep(2000);
       }
@@ -1795,19 +2245,21 @@ ${ocrText}
       const className = document.querySelector('.dialog-header')?.firstElementChild?.innerText || '课件';
       if (classType.includes('PPT')) {
         const slides = document.querySelector('.swiper-wrapper')?.children || [];
-        this.panel.log(`开始播放 PPT：${className}`);
+        panel.log(`开始播放 PPT：${className}`);
         for (let i = 0; i < slides.length; i++) {
+          if (Session.isStopped()) return;
           slides[i].click();
-          this.panel.log(`${className}：第 ${i + 1} 张`);
+          panel.log(`${className}：第 ${i + 1} 张`);
           await Utils.sleep(Config.pptInterval);
         }
         await Utils.sleep(Config.pptInterval);
         const videoBoxes = document.querySelectorAll('.video-box');
         if (videoBoxes?.length) {
-          this.panel.log('PPT 中有视频，继续播放');
+          panel.log('PPT 中有视频，继续播放');
           for (let i = 0; i < videoBoxes.length; i++) {
+            if (Session.isStopped()) return;
             if (videoBoxes[i].innerText === '已完成') {
-              this.panel.log(`第 ${i + 1} 个视频已完成，跳过`);
+              panel.log(`第 ${i + 1} 个视频已完成，跳过`);
               continue;
             }
             videoBoxes[i].click();
@@ -1815,17 +2267,22 @@ ${ocrText}
             await this.waitCoursewareVideo();
           }
         }
-        this.panel.log(`${className} 已播放完毕`);
+        panel.log(`${className} 已播放完毕`);
       } else {
         const videoBox = document.querySelector('.video-box');
         if (videoBox) {
           videoBox.click();
           await Utils.sleep(1800);
           await this.waitCoursewareVideo();
-          this.panel.log(`${className} 视频播放完毕`);
+          panel.log(`${className} 视频播放完毕`);
         }
       }
+      if (Session.isStopped()) return;
       this.updateProgress(this.outside + 1, 0);
+      if (haltIfNoAutoSwitch('当前课件播放完成')) {
+        this.shouldStop = true;
+        return;
+      }
       history.back();
       await Utils.sleep(1000);
     }
@@ -1833,17 +2290,14 @@ ${ocrText}
 
   // ---- pro/lms 旧版（仅做转发） ----
   class ProOldRunner {
-    constructor(panel) {
-      this.panel = panel;
-    }
     run() {
-      this.panel.log('准备打开新标签页...');
+      panel.log('准备打开新标签页...');
       const leafDetail = document.querySelectorAll('.leaf-detail');
       let classCount = Store.getProClassCount() - 1;
       while (leafDetail[classCount] && !leafDetail[classCount].firstChild.querySelector('i').className.includes('shipin')) {
         classCount++;
         Store.setProClassCount(classCount + 1);
-        this.panel.log('课程不属于视频，已跳过');
+        panel.log('课程不属于视频，已跳过');
       }
       leafDetail[classCount]?.click();
     }
@@ -1851,26 +2305,23 @@ ${ocrText}
 
   // ---- pro/lms 新版（主要逻辑） ----
   class ProNewRunner {
-    constructor(panel) {
-      this.panel = panel;
-    }
     async run() {
       preventScreenCheck();
       let classCount = Store.getProClassCount();
-      while (true) {
-        this.panel.log(`准备播放第 ${classCount} 集...`);
+      while (!Session.isStopped()) {
+        panel.log(`准备播放第 ${classCount} 集...`);
         await Utils.sleep(2000);
         const className = document.querySelector('.header-bar')?.firstElementChild?.innerText || '';
         const classType = document.querySelector('.header-bar')?.firstElementChild?.firstElementChild?.getAttribute('class') || '';
         const classStatus = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
         if (classType.includes('tuwen') && !classStatus.includes('已读')) {
-          this.panel.log(`正在阅读：${className}`);
+          panel.log(`正在阅读：${className}`);
           await Utils.sleep(2000);
         } else if (classType.includes('taolun')) {
-          this.panel.log(`讨论区暂不自动发帖，${className}`);
+          panel.log(`讨论区暂不自动发帖，${className}`);
           await Utils.sleep(2000);
         } else if (classType.includes('shipin') && !classStatus.includes('100%')) {
-          this.panel.log(`2s 后开始播放：${className}`);
+          panel.log(`2s 后开始播放：${className}`);
           await Utils.sleep(2000);
           let statusTimer;
           let videoTimer;
@@ -1878,7 +2329,7 @@ ${ocrText}
             statusTimer = setInterval(() => {
               const status = document.querySelector('#app > div.app_index-wrapper > div.wrap > div.viewContainer.heightAbsolutely > div > div > div > div > section.title')?.lastElementChild?.innerText || '';
               if (status.includes('100%') || status.includes('99%') || status.includes('98%') || status.includes('已完成')) {
-                this.panel.log(`${className} 播放完毕`);
+                panel.log(`${className} 播放完毕`);
                 clearInterval(statusTimer);
                 statusTimer = null;
               }
@@ -1886,12 +2337,14 @@ ${ocrText}
 
             const videoWaitStart = Date.now();
             videoTimer = setInterval(() => {
+              if (Session.isStopped()) return;
               const video = document.querySelector('video');
               if (video) {
                 setTimeout(() => {
+                  if (Session.isStopped()) return;
                   Player.applySpeed();
                   Player.mute();
-                  Player.observePause(video);
+                  Player.blockPause(video); // 不接管清理：暂停拦截随页面持续生效，跨集数不中断
                 }, 2000);
                 clearInterval(videoTimer);
                 videoTimer = null;
@@ -1910,23 +2363,25 @@ ${ocrText}
             if (videoTimer) clearInterval(videoTimer);
           }
         } else if (classType.includes('zuoye')) {
-          this.panel.log(`进入作业：${className}（暂无自动答题）`);
+          panel.log(`进入作业：${className}（暂无自动答题）`);
           await Utils.sleep(2000);
         } else if (classType.includes('kaoshi')) {
-          this.panel.log(`进入考试：${className}（不会自动答题）`);
+          panel.log(`进入考试：${className}（不会自动答题）`);
           await Utils.sleep(2000);
         } else if (classType.includes('ketang')) {
-          this.panel.log(`进入课堂：${className}（暂无自动功能）`);
+          panel.log(`进入课堂：${className}（暂无自动功能）`);
           await Utils.sleep(2000);
         } else {
-          this.panel.log(`已看过：${className}`);
+          panel.log(`已看过：${className}`);
           await Utils.sleep(2000);
         }
-        this.panel.log(`第 ${classCount} 集播放完毕`);
+        if (Session.isStopped()) return;
+        panel.log(`第 ${classCount} 集播放完毕`);
         classCount++;
         Store.setProClassCount(classCount);
         const nextBtn = document.querySelector('.btn-next');
         if (nextBtn) {
+          if (haltIfNoAutoSwitch(`第 ${classCount - 1} 集播放完毕`)) break;
           const event1 = new Event('mousemove', { bubbles: true });
           event1.clientX = 9999;
           event1.clientY = 9999;
@@ -1934,9 +2389,9 @@ ${ocrText}
           nextBtn.dispatchEvent(new Event('click'));
         } else {
           localStorage.removeItem(Config.storageKeys.proClassCount);
-          this.panel.log('课程播放完毕 🎉');
+          panel.log('课程播放完毕 🎉');
           Store.clearPendingAutoStart();
-          this.panel.resetStartButton('开始刷课');
+          panel.resetStartButton('开始刷课');
           break;
         }
       }
@@ -1945,15 +2400,6 @@ ${ocrText}
 
   // ---- ai-workspace 新版学习空间 ----
   class AiWorkspaceRunner {
-    constructor(panel) {
-      this.panel = panel;
-    }
-
-    getExerciseQuestionLabel(root) {
-      const tabs = AiWorkspace.getExerciseQuestionTabs(root);
-      const active = tabs.find(tab => /active|current|selected|is-active/.test(tab.className));
-      return AiWorkspace.normalizeText(active?.innerText || '');
-    }
 
     // 获取要跳转回去的目标地址
     getReturnUrl() {
@@ -1966,6 +2412,7 @@ ${ocrText}
     }
 
     async autoSelect() {
+      if (Session.isStopped()) return;
       // 进入ai - workspace的方式有两种：可以处理两种不同的逻辑，增加兼容性
       const returnUrl = this.getReturnUrl()
       // 1. 从传统的 v2 - pro / lms 的目录新开标签页进入（开始刷课）的
@@ -1973,29 +2420,23 @@ ${ocrText}
         await this.returnToSource(returnUrl)
       } else {
         // 2. 直接从ai - workspac页面进入（开始刷课）的
-        this.panel.log("检测到是从ai - workspac页面点击开始刷课");
-        this.source = AiWorkspace.getAllScourse(); // 得到课程列表
+        panel.log("检测到是从ai - workspac页面点击开始刷课");
+        this.source = document.querySelectorAll('.nav-item-leaf-box'); // ai-workspace 课程列表
         this.activateIndex = Array.from(this.source).findIndex(el => el.firstChild.classList.contains("is-active")) // 现在正在刷第几个（从0开始）
         await this.handleNext(this.activateIndex + 1)
       }
     }
 
-    // 获取父窗口对象 window.opener
-    getSourceWindow() {
-      try {
-        if (!window.opener || window.opener.closed) return null;
-        if (window.opener.location.origin !== location.origin) return null;
-        return window.opener;
-      } catch (_) {
-        return null;
-      }
-    }
-
     async returnToSource(returnUrl) {
-      this.panel.log('媒体播放完成，返回课程目录页继续匹配');
+      panel.log('媒体播放完成，返回课程目录页继续匹配');
       await Utils.sleep(1200);
-      const sourceWindow = this.getSourceWindow();
-      console.log(sourceWindow);
+      // 取回打开本页的课程目录窗口（跨域 opener 不可用）
+      let sourceWindow = null;
+      try {
+        if (window.opener && !window.opener.closed && window.opener.location.origin === location.origin) {
+          sourceWindow = window.opener;
+        }
+      } catch (_) { }
       if (sourceWindow) {
         try {
           sourceWindow.location.href = returnUrl;
@@ -2016,11 +2457,12 @@ ${ocrText}
 
     async handleMedia(route) {
       const title = AiWorkspace.getActiveLeafTitle() || `${route.type} ${route.leafId}`;
-      this.panel.log(`开始播放：${title}`);
+      panel.log(`开始播放：${title}`);
       const ready = await Utils.poll(() => Boolean(AiWorkspace.getMedia()), { interval: 500, timeout: 20000 });
+      if (Session.isStopped()) return false;
       let media = AiWorkspace.getMedia();
       if (!ready || !media) {
-        this.panel.log('未找到视频/音频元素，停止当前轮次');
+        panel.log('未找到视频/音频元素，停止当前轮次');
         return false;
       }
 
@@ -2028,14 +2470,15 @@ ${ocrText}
       const shouldResume = () => !playbackState.completed;
       let stopObserve = () => { };
       if (media.tagName.toLowerCase() === 'video') {
-        Player.applySpeed();
+        Player.applySpeed(media);
         Player.mute();
-        stopObserve = Player.observePause(media, shouldResume);
+        stopObserve = Player.blockPause(media, shouldResume);
       } else {
-        Player.applyMediaDefault(media);
+        Player.applySpeed(media, true);
       }
       const stopKeepAlive = AiWorkspace.keepAlive(shouldResume);
-      this.panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${Config.playbackRate}x，静音开启`);
+      const rateConf = Store.getRateConf();
+      panel.log(`已接管播放器：${media.tagName.toLowerCase()}，目标倍速 ${rateConf.targetRate}x，静音开启；按钮设速:${rateConf.buttonSetEnabled ? '开' : '关'} 直设倍速:${rateConf.directSetEnabled ? '开' : '关'} 倍速保活:${rateConf.keepAliveEnabled ? '开' : '关'} 回写拦截:${rateConf.ratechangeBlockEnabled ? '开' : '关'}`);
       try {
         let startTime = Number(media.currentTime || 0);
         const started = await Utils.poll(() => {
@@ -2046,7 +2489,7 @@ ${ocrText}
           return currentTime > startTime + 0.5 || (!media.paused && media.readyState >= 2 && currentTime > startTime + 0.2);
         }, { interval: 500, timeout: 15000 });
         if (!started) {
-          this.panel.log('未确认到视频实际开始播放，停止当前轮次');
+          if (!Session.isStopped()) panel.log('未确认到视频实际开始播放，停止当前轮次');
           return false;
         }
         startTime = Number(media.currentTime || 0);
@@ -2076,7 +2519,7 @@ ${ocrText}
         media.removeEventListener('ended', onEnded);
         playbackState.completed = true;
         if (!done) {
-          this.panel.log('等待播放完成超时，停止当前轮次');
+          if (!Session.isStopped()) panel.log('等待播放完成超时，停止当前轮次');
           return false;
         }
       } finally {
@@ -2084,18 +2527,18 @@ ${ocrText}
         stopKeepAlive();
       }
 
-      this.panel.log(`${title} 播放完成`);
+      panel.log(`${title} 播放完成`);
       return true;
     }
 
     async solveExerciseQuestion(root, label = '') {
       const questionRoot = AiWorkspace.getExerciseQuestionBody(root);
       if (!questionRoot) {
-        this.panel.log('未找到题目容器，停止当前轮次');
+        panel.log('未找到题目容器，停止当前轮次');
         return false;
       }
       if (AiWorkspace.isExerciseAnswered(questionRoot)) {
-        this.panel.log(`${label || '当前题目'} 已完成，跳过`);
+        panel.log(`${label || '当前题目'} 已完成，跳过`);
         return true;
       }
 
@@ -2111,27 +2554,28 @@ ${ocrText}
         ? listContainer.querySelectorAll('li, .option-item, .answer-item, [class*="option-item"], [class*="answer-item"]').length
         : 0;
       if (!optionCount) {
-        this.panel.log(`${label || '当前题目'} 未找到选项，跳过`);
+        panel.log(`${label || '当前题目'} 未找到选项，跳过`);
         return false;
       }
 
-      const ocrResult = await Solver.recognize(questionRoot);
-      if (!ocrResult || ocrResult.length <= 5) {
-        this.panel.log(`${label || '当前题目'} OCR 结果过短，跳过`);
+      const mode = Solver.resolveAnswerMode();
+      const questionInput = await Solver.prepareQuestion(questionRoot, mode);
+      if (!questionInput) {
+        panel.log(`${label || '当前题目'} ${mode === 'vision' ? '截图失败' : 'OCR 结果过短'}，跳过`);
         return false;
       }
 
       const maxRetry = 3;
       for (let retryCount = 0; retryCount < maxRetry; retryCount++) {
         try {
-          if (retryCount > 0) this.panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
-          this.panel.log('🤖 请求 AI 获取答案...');
-          const aiText = await Solver.askAI(ocrResult, optionCount);
+          if (retryCount > 0) panel.log(`${label || '当前题目'} 重试 ${retryCount}/${maxRetry - 1}`);
+          panel.log('🤖 请求 AI 获取答案...');
+          const aiText = await Solver.askAI(questionInput, optionCount);
           await Solver.autoSelectAndSubmit(aiText, questionRoot);
           await Utils.sleep(1200);
           return true;
         } catch (err) {
-          this.panel.log(`AI 答题失败：${err}`);
+          panel.log(`AI 答题失败：${err}`);
           if (retryCount < maxRetry - 1) await Utils.sleep(5000);
         }
       }
@@ -2154,22 +2598,24 @@ ${ocrText}
     async handleExercise(route) {
       const featureFlags = Store.getFeatureConf();
       if (!featureFlags.autoAI) {
-        this.panel.log('已关闭 AI 自动答题，作业将直接跳过');
+        panel.log('已关闭 AI 自动答题，作业将直接跳过');
         return true;
       }
 
       const ready = await Utils.poll(() => Boolean(AiWorkspace.getExerciseContainer()), { interval: 500, timeout: 20000 });
+      if (Session.isStopped()) return true;
       const root = AiWorkspace.getExerciseContainer();
       if (!ready || !root) {
-        this.panel.log('未找到作业容器，停止当前轮次');
+        panel.log('未找到作业容器，停止当前轮次');
         return false;
       }
 
-      this.panel.log(`开始处理作业：${AiWorkspace.getActiveLeafTitle() || route.leafId}`);
+      panel.log(`开始处理作业：${AiWorkspace.getActiveLeafTitle() || route.leafId}`);
       const tabs = AiWorkspace.getExerciseQuestionTabs(root);
       if (tabs.length) {
-        this.panel.log(`检测到题目索引 ${tabs.length} 个，按题号顺序作答`);
+        panel.log(`检测到题目索引 ${tabs.length} 个，按题号顺序作答`);
         for (let i = 0; i < tabs.length; i++) {
+          if (Session.isStopped()) return true;
           const currentRoot = AiWorkspace.getExerciseContainer() || root;
           const currentTabs = AiWorkspace.getExerciseQuestionTabs(currentRoot);
           const currentTab = currentTabs[i];
@@ -2181,15 +2627,17 @@ ${ocrText}
         return true;
       }
 
-      this.panel.log('未找到题号列表，尝试只处理当前题并按下一题推进');
+      panel.log('未找到题号列表，尝试只处理当前题并按下一题推进');
       let previousFingerprint = '';
       for (let i = 0; i < 20; i++) {
+        if (Session.isStopped()) return true;
         const currentRoot = AiWorkspace.getExerciseContainer() || root;
         const questionRoot = AiWorkspace.getExerciseQuestionBody(currentRoot);
         const fingerprint = AiWorkspace.normalizeText(questionRoot?.innerText || '').slice(0, 120);
         if (!fingerprint) break;
         if (i > 0 && fingerprint === previousFingerprint) break;
-        await this.solveExerciseQuestion(currentRoot, this.getExerciseQuestionLabel(currentRoot) || `第 ${i + 1} 题`);
+        const activeTab = AiWorkspace.getExerciseQuestionTabs(currentRoot).find(tab => /active|current|selected|is-active/.test(tab.className));
+        await this.solveExerciseQuestion(currentRoot, AiWorkspace.normalizeText(activeTab?.innerText || '') || `第 ${i + 1} 题`);
         previousFingerprint = fingerprint;
         const moved = await this.advanceExerciseQuestion(currentRoot, fingerprint);
         if (!moved) break;
@@ -2199,9 +2647,10 @@ ${ocrText}
 
     // 直接在ai-workspace页面处理课程的逻辑
     async handleNext(count) {
+      if (Session.isStopped()) return;
       if (count >= this.source.length) {
-        this.panel.log('课程刷完啦 🎉');
-        this.panel.resetStartButton('刷完啦~');
+        panel.log('课程刷完啦 🎉');
+        panel.resetStartButton('刷完啦~');
         Store.clearPendingAutoStart();
         return;
       }
@@ -2215,11 +2664,11 @@ ${ocrText}
       if (preventScreenCheckSwitch) preventScreenCheck();
       const route = AiWorkspace.getRoute();
       if (!route) {
-        this.panel.log('当前页面已离开 ai-workspace/lms-graph');
+        panel.log('当前页面已离开 ai-workspace/lms-graph');
         return;
       }
       if (!route.leafId) {
-        this.panel.log('未能识别当前知识点');
+        panel.log('未能识别当前知识点');
         return;
       }
       let ok = false;
@@ -2228,18 +2677,34 @@ ${ocrText}
       } else if (route.type === 'exercise') {
         ok = await this.handleExercise(route);
       } else {
-        this.panel.log(`当前类型为 ${route.type}，当前暂不自动处理此类型，自动跳过`);
+        panel.log(`当前类型为 ${route.type}，当前暂不自动处理此类型，自动跳过`);
         await Utils.sleep(2000);
         ok = true;
       }
-      if (!ok) this.panel.warn("(该视频可能已经刷完了)，即将跳过开始下一个");
-      // 继续下一个
+      if (Session.isStopped()) return;
+      if (!ok) panel.warn(Store.getFlowConf().autoSwitch ? '(该视频可能已经刷完了)，即将跳过开始下一个' : '(该视频可能已经刷完了)');
+      // 继续下一个任务点/界面；关闭自动切换时停留当前页面，避免切换后抓取失败
+      if (haltIfNoAutoSwitch(ok ? '当前任务点处理完成' : '当前任务点处理结束')) return;
       await this.autoSelect()
     }
   }
 
   // ---- 路由 ----
+  // 停止刷课：结束当前会话、还原对页面/播放器的修改，并持久化停止状态（重新加载也不会自动恢复）
+  function stopBrushing() {
+    Session.stop();
+    Store.clearPendingAutoStart();
+    const restoreOnStop = Store.getFlowConf().restoreOnStop;
+    if (restoreOnStop) PageRestore.restoreAll();
+    panel.resetStartButton('开始刷课');
+    panel.log(restoreOnStop
+      ? '已停止刷课：对页面/播放器的修改已还原；重新加载后不会自动恢复，点击[开始刷课]可重新启动'
+      : '已停止刷课：已按设置保留对页面/播放器的修改（倍速/静音等）；重新加载后不会自动恢复，点击[开始刷课]可重新启动');
+  }
+
   function start() {
+    // 显式开始刷课：清除“用户已停止”状态，之后的跨页面跳转才允许自动续跑
+    Session.begin();
     // ---- ai-workspace获取课程根目录信息并保存（处理完一个课程重定向到根目录） ----
     const classroomId = Utils.getCurrentClassroomId();
     const returnUrl = Utils.returnUrl()
@@ -2247,7 +2712,7 @@ ${ocrText}
     const aiRoute = AiWorkspace.getRoute();
     if (aiRoute) {
       panel.log(`正在匹配处理逻辑：ai-workspace/lms-graph/${aiRoute.type}`);
-      new AiWorkspaceRunner(panel).run();
+      new AiWorkspaceRunner().run();
       return;
     }
     // ---- ai-workspace end
@@ -2256,12 +2721,12 @@ ${ocrText}
     const matchURL = `${url}${path[0]}/${path[1]}/${path[2]}`;
     panel.log(`正在匹配处理逻辑：${matchURL}`);
     if (matchURL.includes('yuketang.cn/v2/web') || matchURL.includes('gdufemooc.cn/v2/web')) {
-      new V2Runner(panel).run();
+      new V2Runner().run();
     } else if (matchURL.includes('yuketang.cn/pro/lms') || matchURL.includes('gdufemooc.cn/pro/lms')) {
       if (document.querySelector('.btn-next')) {
-        new ProNewRunner(panel).run();
+        new ProNewRunner().run();
       } else {
-        new ProOldRunner(panel).run();
+        new ProOldRunner().run();
       }
     } else {
       panel.resetStartButton('开始刷课');
@@ -2271,16 +2736,19 @@ ${ocrText}
 
   // ---- 启动 ----
   async function boot() {
-    if (Utils.inIframe()) return;
+    // 主要是规避firefox会创建多个iframe的问题
+    if (window.top !== window.self) return;
     await Utils.waitForMountTarget();
     try {
       panel = createPanel();
       panel.log(`雨课堂刷课助手 v${Config.version} 已加载`);
       panel.setStartHandler(start);
+      panel.setStopHandler(stopBrushing);
       const pendingAutoStart = Store.getPendingAutoStart();
       const currentClassroomId = Utils.getCurrentClassroomId();
       if (
         pendingAutoStart
+        && !Session.isStopped()
         && Utils.isSupportedLearningPage()
         && currentClassroomId
         && pendingAutoStart.classroomId === currentClassroomId
